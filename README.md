@@ -44,7 +44,7 @@
    - 支持从零开始训练或加载已有模型继续训练。
    - 实现标准的训练-验证循环，并在每个 epoch 结束后打印 Loss。
 
-## 项目目录结构预想
+## 项目目录结构
 ```text
 LCD-FastICA-MCNN/
 ├── data/               # 存放原始 .npy 信号文件
@@ -59,7 +59,7 @@ LCD-FastICA-MCNN/
 │   ├── train_model.py      # 模型训练脚本
 │   └── evaluate.py         # 模型评估脚本 (待实现)
 ├── requirements.txt    # Python 依赖包列表
-└── 设计文档.md         # 项目设计文档
+└── README.md         # 项目文档
 ```
 
 ## 实施路线图
