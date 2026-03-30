@@ -46,7 +46,7 @@ def local_characteristic_scale_decomposition(x, t, num_components=10):
         isc_components.append(isc)
         
         # 检查是否已经达到所需的ISC分量数量或满足极值单调性判据
-        if len(isc_components) >= num_components or extreme_monotonicity_criterion(isc):
+        if len(isc_components) >= num_components: # or extreme_monotonicity_criterion(isc):
             break
         
         # 更新信号
