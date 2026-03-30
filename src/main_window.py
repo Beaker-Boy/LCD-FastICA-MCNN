@@ -31,7 +31,7 @@ os.makedirs(MODELS_DIR, exist_ok=True)
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("信号处理与模型训练 (重构版)")
+        self.setWindowTitle("信号处理与模型训练 ")
         self.setGeometry(100, 100, 600, 700)
         
         # Define the label-to-integer mapping here
