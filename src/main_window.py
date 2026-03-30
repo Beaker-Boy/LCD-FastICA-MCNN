@@ -51,6 +51,9 @@ class MainWindow(QMainWindow):
         
         self.label_sampling_rate = QLabel("采样率(Hz):")
         self.line_edit_sampling_rate = QLineEdit("20000") # Default value
+
+        self.label_max_samples = QLabel("最大采样点数:")
+        self.line_edit_max_samples = QLineEdit("9142857") # Default value
         
         self.label_label = QLabel("选择标签:")
         self.combo_label = QComboBox()
@@ -99,15 +102,22 @@ class MainWindow(QMainWindow):
         sampling_rate_layout.addWidget(self.label_sampling_rate)
         sampling_rate_layout.addWidget(self.line_edit_sampling_rate)
         
+        # Max samples layout
+        max_samples_layout = QHBoxLayout()
+        max_samples_layout.addWidget(self.label_max_samples)
+        max_samples_layout.addWidget(self.line_edit_max_samples)
+
         # Add to batch layout
         add_batch_layout = QHBoxLayout()
         add_batch_layout.addWidget(self.label_label)
         add_batch_layout.addWidget(self.combo_label)
         add_batch_layout.addWidget(self.button_add_to_batch, 1)
+        add_batch_layout.addWidget(self.button_add_to_batch, 1)
 
         main_layout.addWidget(self.label_file)
         main_layout.addLayout(file_selection_layout)
         main_layout.addLayout(sampling_rate_layout)
+        main_layout.addLayout(max_samples_layout)
         main_layout.addLayout(add_batch_layout)
         
         main_layout.addSpacing(20)
@@ -190,6 +200,12 @@ class MainWindow(QMainWindow):
                 return
             sampling_rate = int(sampling_rate_text)
 
+            max_samples_text = self.line_edit_max_samples.text()
+            if not max_samples_text.isdigit() or int(max_samples_text) <= 0:
+                QMessageBox.warning(self, "警告", "请输入一个有效的正整数作为最大采样点数。")
+                return
+            max_samples = int(max_samples_text)
+
             QApplication.processEvents() # Update UI
             for row in range(self.table_batch.rowCount()):
                 npy_path = self.table_batch.item(row, 0).text()
@@ -205,7 +221,7 @@ class MainWindow(QMainWindow):
                 mat_output_path = os.path.join(ICA_RESULTS_DIR, mat_file_name)
                 
                 print(f"Processing {npy_path} -> {mat_output_path}")
-                fast_ica_processing(npy_path, mat_output_path, sampling_rate)
+                fast_ica_processing(npy_path, mat_output_path, sampling_rate, max_samples=max_samples)
                 
                 mat_file_list.append(mat_output_path)
                 label_list_for_build.append(self.label_map[label_str])

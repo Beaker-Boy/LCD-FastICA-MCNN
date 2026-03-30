@@ -120,12 +120,14 @@ def extreme_monotonicity_criterion(x):
 
     return is_monotonic
 
-def fast_ica_processing(file_path, output_path, sampling_rate, num_components=10):
+def fast_ica_processing(file_path, output_path, sampling_rate, num_components=10, max_samples=None):
     """
     执行LCD-FASTICA处理的主函数
     """
     # 打开NPY文件
     part_channel_data = np.load(file_path)
+    if max_samples is not None:
+        part_channel_data = part_channel_data[:max_samples]
     #
     np_channel_data = part_channel_data
     fs = sampling_rate  # 使用传入的采样率
