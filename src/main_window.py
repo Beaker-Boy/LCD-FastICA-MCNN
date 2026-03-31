@@ -4,15 +4,18 @@ import time
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QPushButton, QLabel, 
                              QLineEdit, QFileDialog, QVBoxLayout, QWidget, 
                              QMessageBox, QComboBox, QTableWidget, QTableWidgetItem,
-                             QHBoxLayout, QHeaderView)
+                             QHBoxLayout, QHeaderView, QGroupBox)
 from PyQt5.QtCore import Qt
 
 # It's better to have other modules not create plots automatically.
 # This should be controlled by the main application.
 # For now, we assume they are refactored to not show plots.
-from lcd_fastica import fast_ica_processing
+from lcd_fastica import process_signal_pipeline, fast_ica_processing
 from build_tensor import build_tensor_data
 from train_model import train_model
+
+# Define available processing methods
+PROCESSING_METHODS = ['None', 'LCD', 'FastICA']
 
 # --- Directory Setup ---
 # Get the absolute path of the directory containing this script (src)
@@ -44,12 +47,12 @@ class MainWindow(QMainWindow):
     
     def initUI(self):
         # --- Top Level: File Selection ---
-        self.label_file = QLabel("1. 选择NPY文件:")
+        self.label_file = QLabel("1. 选择 NPY 文件:")
         self.line_edit_file = QLineEdit()
         self.button_file = QPushButton("浏览")
         self.button_file.clicked.connect(self.browse_file)
         
-        self.label_sampling_rate = QLabel("采样率(Hz):")
+        self.label_sampling_rate = QLabel("采样率 (Hz):")
         self.line_edit_sampling_rate = QLineEdit("20000") # Default value
 
         self.label_max_samples = QLabel("最大采样点数:")
@@ -58,6 +61,27 @@ class MainWindow(QMainWindow):
         self.label_label = QLabel("选择标签:")
         self.combo_label = QComboBox()
         self.combo_label.addItems(self.label_map.keys())
+        
+        # --- Processing Method Selection (up to 4 methods in sequence) ---
+        processing_group = QGroupBox("信号处理方法配置（按顺序选择最多 4 种方法）")
+        processing_layout = QVBoxLayout()
+        
+        self.method_combos = []
+        for i in range(4):
+            method_layout = QHBoxLayout()
+            method_label = QLabel(f"步骤 {i+1}:")
+            method_combo = QComboBox()
+            method_combo.addItems(PROCESSING_METHODS)
+            method_combo.setCurrentIndex(0)  # Default to 'None'
+            
+            method_layout.addWidget(method_label)
+            method_layout.addWidget(method_combo)
+            method_layout.addStretch()
+            
+            processing_layout.addLayout(method_layout)
+            self.method_combos.append(method_combo)
+        
+        processing_group.setLayout(processing_layout)
         
         self.button_add_to_batch = QPushButton("添加至批处理列表")
         self.button_add_to_batch.clicked.connect(self.add_to_batch)
@@ -120,6 +144,9 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(max_samples_layout)
         main_layout.addLayout(add_batch_layout)
         
+        # Add processing group
+        main_layout.addWidget(processing_group)
+        
         main_layout.addSpacing(20)
 
         main_layout.addWidget(self.label_batch)
@@ -166,16 +193,29 @@ class MainWindow(QMainWindow):
         label = self.combo_label.currentText()
         
         if not file_path or not os.path.exists(file_path):
-            QMessageBox.warning(self, "警告", "请选择一个有效的NPY文件")
+            QMessageBox.warning(self, "警告", "请选择一个有效的 NPY 文件")
             return
+        
+        # Collect selected processing methods (only non-None methods)
+        selected_methods = []
+        for combo in self.method_combos:
+            method = combo.currentText()
+            if method != 'None':
+                selected_methods.append(method)
+        
+        # Create a description of the processing pipeline
+        pipeline_desc = ' -> '.join(selected_methods) if selected_methods else '无处理'
 
         row_count = self.table_batch.rowCount()
         self.table_batch.insertRow(row_count)
         self.table_batch.setItem(row_count, 0, QTableWidgetItem(file_path))
         self.table_batch.setItem(row_count, 1, QTableWidgetItem(label))
+        # Store the processing methods list in userData
+        item = QTableWidgetItem(pipeline_desc)
+        item.setData(Qt.UserRole, selected_methods)
         self.table_batch.setItem(row_count, 2, QTableWidgetItem("待处理"))
         
-        print(f"Added to batch: {file_path} with label '{label}'")
+        print(f"Added to batch: {file_path} with label '{label}' and processing pipeline: {pipeline_desc}")
 
     def process_batch(self):
         # --- 1. Validation ---
@@ -210,8 +250,13 @@ class MainWindow(QMainWindow):
             for row in range(self.table_batch.rowCount()):
                 npy_path = self.table_batch.item(row, 0).text()
                 label_str = self.table_batch.item(row, 1).text()
+                
+                # Retrieve the processing methods for this file
+                status_item = self.table_batch.item(row, 2)
+                selected_methods = status_item.data(Qt.UserRole) if status_item else []
 
-                self.table_batch.item(row, 2).setText("正在处理 (LCD-FastICA)...")
+                pipeline_text = ' -> '.join(selected_methods) if selected_methods else '无'
+                self.table_batch.item(row, 2).setText(f"正在处理 ({pipeline_text})...")
                 QApplication.processEvents()
 
                 # Create unique output path for the .mat file
@@ -220,8 +265,21 @@ class MainWindow(QMainWindow):
                 mat_file_name = f"{file_name_no_ext}_{int(time.time())}.mat"
                 mat_output_path = os.path.join(ICA_RESULTS_DIR, mat_file_name)
                 
-                print(f"Processing {npy_path} -> {mat_output_path}")
-                fast_ica_processing(npy_path, mat_output_path, sampling_rate, max_samples=max_samples)
+                print(f"\nProcessing {npy_path} -> {mat_output_path}")
+                print(f"Processing pipeline: {' -> '.join(selected_methods) if selected_methods else 'None'}")
+                
+                # Use the new flexible pipeline
+                if selected_methods:
+                    process_signal_pipeline(
+                        file_path=npy_path,
+                        output_path=mat_output_path,
+                        sampling_rate=sampling_rate,
+                        processing_methods=selected_methods,
+                        max_samples=max_samples
+                    )
+                else:
+                    # If no methods selected, use default LCD+FastICA for backward compatibility
+                    fast_ica_processing(npy_path, mat_output_path, sampling_rate, max_samples=max_samples)
                 
                 mat_file_list.append(mat_output_path)
                 label_list_for_build.append(self.label_map[label_str])

@@ -271,3 +271,93 @@ def fast_ica_processing(file_path, output_path, sampling_rate, num_components=10
         plt.ylabel('acceleration (g)')  # 添加纵轴标题，并标出单位
 
     plt.tight_layout()
+
+def process_signal_pipeline(file_path, output_path, sampling_rate, processing_methods, max_samples=None, num_components=10):
+    """
+    灵活的信号处理管道，支持按顺序应用多种处理方法
+    
+    Args:
+        file_path: 输入信号文件路径 (.npy)
+        output_path: 输出文件路径 (.mat)
+        sampling_rate: 采样率 (Hz)
+        processing_methods: 处理方法列表，如 ['LCD', 'FastICA']
+        max_samples: 最大采样点数
+        num_components: 分解/分离的分量数量
+    
+    Returns:
+        processed_signal: 处理后的信号数组
+        processing_info: 处理信息字典
+    """
+    # 读取信号
+    signal = np.load(file_path)
+    if max_samples is not None:
+        signal = signal[:max_samples]
+    
+    fs = sampling_rate
+    N = len(signal)
+    t = np.arange(N) / fs
+    
+    current_signal = signal.copy()
+    processing_steps = []
+    
+    # 依次应用每个处理方法
+    for method in processing_methods:
+        if method == 'LCD':
+            print(f"执行 LCD 分解...")
+            isc_components = local_characteristic_scale_decomposition(current_signal, t, num_components=num_components)
+            
+            # 将所有 ISC 分量堆叠
+            current_signal = np.column_stack(isc_components)
+            processing_steps.append(f"LCD({len(isc_components)} components)")
+            print(f"LCD 完成，生成 {len(isc_components)} 个分量")
+            
+        elif method == 'FastICA':
+            # FastICA 需要多通道输入
+            if current_signal.ndim == 1 or current_signal.shape[1] == 1:
+                print("警告：单通道信号无法执行 FastICA，跳过此步骤")
+                processing_steps.append("FastICA Skipped (single channel)")
+            else:
+                print(f"执行 FastICA 分离...")
+                
+                # 处理 NaN 值
+                imputer = SimpleImputer(strategy='mean')
+                signal_imputed = imputer.fit_transform(current_signal)
+                
+                # 中心化
+                signal_centered = signal_imputed - np.mean(signal_imputed, axis=0)
+                
+                # 白化
+                scaler = StandardScaler(with_mean=False, with_std=True)
+                signal_whitened = scaler.fit_transform(signal_centered)
+                
+                # 执行 FastICA
+                ica_n_components = min(num_components, signal_whitened.shape[1])
+                ica = FastICA(n_components=ica_n_components, random_state=0, tol=1e-4, max_iter=500)
+                signal_ica = ica.fit_transform(signal_whitened)
+                
+                current_signal = signal_ica
+                processing_steps.append(f"FastICA({current_signal.shape[1]} components)")
+                print(f"FastICA 完成，输出 {current_signal.shape[1]} 个成分")
+    
+    # 如果最终是单通道，reshape 为 2D 数组
+    if current_signal.ndim == 1:
+        current_signal = current_signal.reshape(-1, 1)
+    
+    processing_info = {
+        'input_shape': signal.shape,
+        'output_shape': current_signal.shape,
+        'processing_steps': processing_steps,
+        'sampling_rate': sampling_rate,
+        'time_vector': t
+    }
+    
+    # 保存结果
+    ica_result_dict = {
+        'ICA_Components': current_signal,
+        'Processing_Info': processing_info,
+        'Processing_Steps': '_'.join(processing_steps)
+    }
+    savemat(output_path, ica_result_dict)
+    print(f'处理结果已保存至 {output_path}')
+    
+    return current_signal, processing_info
