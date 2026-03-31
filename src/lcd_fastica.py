@@ -8,28 +8,36 @@ import time
 from sklearn.decomposition import FastICA
 from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Try to import optional decomposition libraries
 try:
     from vmdpy import VMD
     VMD_AVAILABLE = True
+    logger.info("VMD library loaded successfully")
 except ImportError:
     VMD_AVAILABLE = False
-    print("Warning: vmdpy not installed. VMD method will not be available.")
+    logger.warning("vmdpy not installed. VMD method will not be available.")
 
 try:
     from PyEMD import EEMD
     EEMD_AVAILABLE = True
+    logger.info("EEMD library loaded successfully")
 except ImportError:
     EEMD_AVAILABLE = False
-    print("Warning: PyEMD not installed. EEMD method will not be available.")
+    logger.warning("PyEMD not installed. EEMD method will not be available.")
 
 try:
     from PyLMD import LMD
     LMD_AVAILABLE = True
+    logger.info("LMD library loaded successfully")
 except ImportError:
     LMD_AVAILABLE = False
-    print("Warning: PyLMD not installed. LMD method will not be available.")
+    logger.warning("PyLMD not installed. LMD method will not be available.")
 
 
 def linear_transform(x, t, m):
@@ -358,176 +366,170 @@ if __name__ == "__main__":
     print("测试完成!")
     print("=" * 60)
 
-def fast_ica_processing(file_path, output_path, sampling_rate, num_components=10, max_samples=None):
+def fast_ica_processing(file_path, output_path, sampling_rate, num_components=10, 
+                       max_samples=None, progress_callback=None):
     """
-    执行LCD-FASTICA处理的主函数
-    """
-    # 打开NPY文件
-    part_channel_data = np.load(file_path)
-    if max_samples is not None:
-        part_channel_data = part_channel_data[:max_samples]
-    #
-    np_channel_data = part_channel_data
-    fs = sampling_rate  # 使用传入的采样率
-    N = len(np_channel_data)
-    n = np.arange(N)
-    t = n / fs
-
-    # 设计低通滤波器
-    cutoff = 5000  # 截止频率
-    nyquist = 0.5 * fs  # 奈奎斯特频率
-    normal_cutoff = cutoff / nyquist
-    b, a = butter(5, normal_cutoff, btype='low', analog=False)
-    # 应用低通滤波器
-    x = lfilter(b, a, np_channel_data)
-    x = np_channel_data
-
-    # 频谱图
-    y2 = x
-    L = len(y2)
-    NFFT = 2 ** int(np.ceil(np.log2(L)))
-    Y = np.fft.fft(y2, NFFT) / L
-    f = fs / 2 * np.linspace(0, 1, NFFT // 2)
-
-    start_time = time.time()
-
-    # 执行LCD分解
-    isc_components = local_characteristic_scale_decomposition(x, t, num_components=num_components)
-
-    # 检查生成的ISC分量数量
-    print(f"生成的ISC分量数量: {len(isc_components)}")
-
-    # 打印原信号的数值范围
-    print(f"原信号: Min={np.min(x)}, Max={np.max(x)}, Mean={np.mean(x)}")
-
-    # 计算并打印原信号的最大频率区间范围
-    max_freq_x = f[np.argmax(2 * np.abs(Y[:NFFT // 2]))]
-    print(f"原信号的最大频率: {max_freq_x} Hz")
-
-    # 打印每个ISC分量的数值范围及其最大频率区间范围
-    for i, isc in enumerate(isc_components):
-        # 计算ISC分量的频谱
-        Y_isc = np.fft.fft(isc, NFFT) / L
-        max_freq_isc = f[np.argmax(2 * np.abs(Y_isc[:NFFT // 2]))]
-        
-        print(f"ISC Component {i+1}: Min={np.min(isc)}, Max={np.max(isc)}, Mean={np.mean(isc)}")
-        print(f"ISC Component {i+1} 的最大频率: {max_freq_isc} Hz")
-
-    # 计算各ISC分量与原信号的相关系数
-    correlation_coefficients = [np.corrcoef(x, isc)[0, 1] for isc in isc_components]
-
-    # 打印相关系数
-    for i, corr in enumerate(correlation_coefficients):
-        print(f"ISC Component {i+1} 与原信号的相关系数: {corr}")
-
-    # 记录结束时间
-    end_time = time.time()
-
-    # 计算并输出运行时间
-    elapsed_time = end_time - start_time
-    print(f"总运行时间: {elapsed_time:.2f} 秒")
-
-    # 计算重构误差
-    reconstructed_signal = np.sum(isc_components, axis=0)
-    reconstruction_error = np.linalg.norm(x - reconstructed_signal, ord=2)
-    print(f"重构误差: {reconstruction_error}")
-
-    # 将ISC分量堆叠成一个二维数组，每一列代表一个ISC分量
-    isc_components_array = np.column_stack(isc_components)
-
-    # 绘制LCD分解结果
-    plt.figure(figsize=(14, 8 * len(isc_components)))  # 调整图形大小
-
-    for i, isc in enumerate(isc_components, 1):
-        plt.subplot(len(isc_components), 1, i)  # 调整子图索引
-        plt.plot(t, isc, 'k')
-        plt.title(f'ISC Component {i}')
-        plt.xlabel('Times(s)')  # 添加横坐标标题
-        plt.ylabel('Acceleration(g)')  # 添加纵坐标标题
-        plt.xlim(0, t.max())
-        plt.ylim(min(0, np.min(isc)), max(0, np.max(isc)))
-
-    plt.tight_layout(pad=20.0)  # 增加子图之间的填充间距
-
-    # 将ISC分量堆叠成一个二维数组，每一列代表一个ISC分量
-    isc_components_array = np.column_stack(isc_components)
-
-    # 选择第某个 ISC 分量
-    isc_component_1 = isc_components_array[:, 0]
-
-    # 将第某个 ISC 分量和原始信号组合成输入矩阵
-    S = np.vstack((isc_component_1, x)).T
-
-    # 处理 NaN 值
-    imputer = SimpleImputer(strategy='mean')  # 使用均值填充 NaN 值
-    S_imputed = imputer.fit_transform(S)
-
-    # 中心化数据
-    S_centered = S_imputed - np.mean(S_imputed, axis=0)
-
-    # 白化数据
-    scaler = StandardScaler(with_mean=False, with_std=True)
-    S_whitened = scaler.fit_transform(S_centered)
-
-    # 执行 FastICA 分析
-    num_components = 2  # 提取的分量个数
-    ica = FastICA(n_components=num_components, random_state=0, tol=1e-4, max_iter=500)
-
-    # 添加进度条
-    with tqdm(total=ica.max_iter, desc="FastICA Iteration") as pbar:
-        def callback_(W):
-            pbar.update(1)
-        ica.callback = callback_
-
-    S_ = ica.fit_transform(S_whitened)  # 重构信号
-    A_ = ica.mixing_  # 获取估计的混合矩阵
-
-    # 检查 S_ 是否全为零
-    print("S_ shape:", S_.shape)
-    print("S_ mean:", np.mean(S_))
-    print("S_ std:", np.std(S_))
-    print("S_ min:", np.min(S_))
-    print("S_ max:", np.max(S_))
-
-    # 保存 FastICA 结果到文件
-    ica_result_dict = {
-        'ICA_Components': S_,
-        'Estimated_Mixing_Matrix': A_
-    }
-    savemat(output_path, ica_result_dict)
-    print(f'ICA results saved successfully to {output_path}')
-
-    # 绘制解混后的信号时域图
-    plt.figure(figsize=(10, 4))
-
-    for i in range(num_components):
-        plt.subplot(num_components, 1, i + 1)
-        plt.plot(t, S_[:, i], 'k')
-        plt.title(f'ICA{i+1}')
-        plt.xlabel('time (s)')  # 修改为时间单位
-        plt.xlim(0, t.max())  # 设置横轴范围为信号的总时长
-        plt.ylabel('acceleration (g)')  # 添加纵轴标题，并标出单位
-
-    plt.tight_layout()
-
-def process_signal_pipeline(file_path, output_path, sampling_rate, processing_methods, max_samples=None, num_components=10):
-    """
-    灵活的信号处理管道，支持按顺序应用多种处理方法
+    执行 LCD-FASTICA 处理的主函数（向后兼容接口）
     
     Args:
         file_path: 输入信号文件路径 (.npy)
         output_path: 输出文件路径 (.mat)
         sampling_rate: 采样率 (Hz)
-        processing_methods: 处理方法列表，如 ['LCD', 'FastICA']
+        num_components: 分解分量数量
+        max_samples: 最大采样点数
+        progress_callback: 进度回调函数 callback(current_step, total_steps, message)
+    """
+    def report_progress(step, message):
+        if progress_callback:
+            progress_callback(step, 4, message)
+        logger.info(message)
+    
+    try:
+        report_progress(1, "读取 NPY 文件")
+        part_channel_data = np.load(file_path)
+        if max_samples is not None:
+            part_channel_data = part_channel_data[:max_samples]
+        
+        np_channel_data = part_channel_data
+        fs = sampling_rate
+        N = len(np_channel_data)
+        n = np.arange(N)
+        t = n / fs
+
+        # Design low-pass filter
+        report_progress(2, "应用低通滤波器")
+        cutoff = 5000
+        nyquist = 0.5 * fs
+        normal_cutoff = cutoff / nyquist
+        b, a = butter(5, normal_cutoff, btype='low', analog=False)
+        x = lfilter(b, a, np_channel_data)
+
+        report_progress(3, f"执行 LCD 分解 (分量数：{num_components})")
+        isc_components = local_characteristic_scale_decomposition(x, t, num_components=num_components)
+
+        print(f"生成的 ISC 分量数量：{len(isc_components)}")
+        print(f"原信号：Min={np.min(x)}, Max={np.max(x)}, Mean={np.mean(x)}")
+
+        # Calculate and print frequency information
+        Y = np.fft.fft(x, 2 ** int(np.ceil(np.log2(len(x))))) / len(x)
+        f = fs / 2 * np.linspace(0, 1, len(Y) // 2)
+        max_freq_x = f[np.argmax(2 * np.abs(Y[:len(Y) // 2]))]
+        print(f"原信号的最大频率：{max_freq_x} Hz")
+
+        for i, isc in enumerate(isc_components):
+            Y_isc = np.fft.fft(isc, 2 ** int(np.ceil(np.log2(len(isc))))) / len(isc)
+            max_freq_isc = f[np.argmax(2 * np.abs(Y_isc[:len(Y_isc) // 2]))]
+            print(f"ISC Component {i+1}: Min={np.min(isc)}, Max={np.max(isc)}, Mean={np.mean(isc)}")
+            print(f"ISC Component {i+1} 的最大频率：{max_freq_isc} Hz")
+
+        correlation_coefficients = [np.corrcoef(x, isc)[0, 1] for isc in isc_components]
+        for i, corr in enumerate(correlation_coefficients):
+            print(f"ISC Component {i+1} 与原信号的相关系数：{corr}")
+
+        reconstructed_signal = np.sum(isc_components, axis=0)
+        reconstruction_error = np.linalg.norm(x - reconstructed_signal, ord=2)
+        print(f"重构误差：{reconstruction_error}")
+
+        isc_components_array = np.column_stack(isc_components)
+        isc_component_1 = isc_components_array[:, 0]
+        S = np.vstack((isc_component_1, x)).T
+
+        imputer = SimpleImputer(strategy='mean')
+        S_imputed = imputer.fit_transform(S)
+        S_centered = S_imputed - np.mean(S_imputed, axis=0)
+        scaler = StandardScaler(with_mean=False, with_std=True)
+        S_whitened = scaler.fit_transform(S_centered)
+
+        report_progress(4, "执行 FastICA 分离")
+        num_components = 2
+        ica = FastICA(n_components=num_components, random_state=0, tol=1e-4, max_iter=500)
+
+        with tqdm(total=ica.max_iter, desc="FastICA Iteration") as pbar:
+            def callback_(W):
+                pbar.update(1)
+            ica.callback = callback_
+
+        S_ = ica.fit_transform(S_whitened)
+        A_ = ica.mixing_
+
+        print("S_ shape:", S_.shape)
+        print("S_ mean:", np.mean(S_))
+        print("S_ std:", np.std(S_))
+        print("S_ min:", np.min(S_))
+        print("S_ max:", np.max(S_))
+
+        ica_result_dict = {
+            'ICA_Components': S_,
+            'Estimated_Mixing_Matrix': A_
+        }
+        savemat(output_path, ica_result_dict)
+        print(f'ICA results saved successfully to {output_path}')
+        
+        report_progress(4, "处理完成")
+
+    except Exception as e:
+        logger.error(f"fast_ica_processing 失败：{str(e)}")
+        raise
+
+def process_signal_pipeline(file_path, output_path, sampling_rate, processing_methods, 
+                           max_samples=None, num_components=10, progress_callback=None):
+    """
+    灵活的信号处理管道，支持单一分解方法 + 可选 FastICA
+    
+    Args:
+        file_path: 输入信号文件路径 (.npy)
+        output_path: 输出文件路径 (.mat)
+        sampling_rate: 采样率 (Hz)
+        processing_methods: 处理方法列表，仅允许 ['分解方法'] 或 ['分解方法', 'FastICA']
         max_samples: 最大采样点数
         num_components: 分解/分离的分量数量
+        progress_callback: 进度回调函数 callback(current_step, total_steps, message)
     
     Returns:
         processed_signal: 处理后的信号数组
         processing_info: 处理信息字典
+    
+    Raises:
+        ValueError: 当处理方法组合不合法时
+        ImportError: 当所需依赖未安装时
+        RuntimeError: 当处理过程失败时
     """
-    # 读取信号
-    signal = np.load(file_path)
+    def report_progress(step, message):
+        """Helper function to report progress"""
+        if progress_callback:
+            progress_callback(step, len(processing_methods), message)
+        logger.info(f"Step {step}/{len(processing_methods)}: {message}")
+    
+    # Validate processing methods combination
+    decomposition_methods = ['LCD', 'VMD', 'EEMD', 'LMD']
+    allowed_methods = decomposition_methods + ['FastICA']
+    
+    # Check 1: Validate all methods are allowed
+    for method in processing_methods:
+        if method not in allowed_methods:
+            raise ValueError(f"不支持的处理方法：{method}")
+    
+    # Check 2: Ensure only one decomposition method
+    decomp_count = sum(1 for method in processing_methods if method in decomposition_methods)
+    if decomp_count == 0:
+        raise ValueError("必须选择一种分解方法（LCD、VMD、EEMD 或 LMD）")
+    if decomp_count > 1:
+        raise ValueError("只允许使用一种分解方法，禁止多种分解方法串联")
+    
+    # Check 3: Ensure FastICA is only used after decomposition method
+    if 'FastICA' in processing_methods:
+        if processing_methods[0] == 'FastICA':
+            raise ValueError("FastICA 必须在分解方法之后使用")
+        if len(processing_methods) > 2:
+            raise ValueError("最多只能使用两种方法：一种分解方法 + FastICA")
+    
+    # Read signal
+    report_progress(0, "读取信号文件")
+    try:
+        signal = np.load(file_path)
+    except Exception as e:
+        raise RuntimeError(f"读取 NPY 文件失败：{str(e)}")
+    
     if max_samples is not None:
         signal = signal[:max_samples]
     
@@ -538,82 +540,96 @@ def process_signal_pipeline(file_path, output_path, sampling_rate, processing_me
     current_signal = signal.copy()
     processing_steps = []
     
-    # 依次应用每个处理方法
-    for method in processing_methods:
-        if method == 'LCD':
-            print(f"执行 LCD 分解...")
-            isc_components = local_characteristic_scale_decomposition(current_signal, t, num_components=num_components)
-            
-            # 将所有 ISC 分量堆叠
-            current_signal = np.column_stack(isc_components)
-            processing_steps.append(f"LCD({len(isc_components)} components)")
-            print(f"LCD 完成，生成 {len(isc_components)} 个分量")
-            
-        elif method == 'VMD':
-            print(f"执行 VMD 分解...")
-            imfs = vmd_decomposition(current_signal, fs, K=num_components)
-            
-            # 选择相关系数高的分量
-            selected_imfs = select_correlated_components(imfs, current_signal)
-            
-            # 将选中的 IMF 分量堆叠
-            current_signal = np.column_stack(selected_imfs)
-            processing_steps.append(f"VMD({len(selected_imfs)} components)")
-            print(f"VMD 完成，选中 {len(selected_imfs)} 个分量")
-            
-        elif method == 'EEMD':
-            print(f"执行 EEMD 分解...")
-            imfs = eemd_decomposition(current_signal, fs, max_imf=num_components)
-            
-            # 选择相关系数高的分量
-            selected_imfs = select_correlated_components(imfs, current_signal)
-            
-            # 将选中的 IMF 分量堆叠
-            current_signal = np.column_stack(selected_imfs)
-            processing_steps.append(f"EEMD({len(selected_imfs)} components)")
-            print(f"EEMD 完成，选中 {len(selected_imfs)} 个分量")
-            
-        elif method == 'LMD':
-            print(f"执行 LMD 分解...")
-            imfs = lmd_decomposition(current_signal, fs)
-            
-            # 选择相关系数高的分量
-            selected_imfs = select_correlated_components(imfs, current_signal)
-            
-            # 将选中的 PF 分量堆叠
-            current_signal = np.column_stack(selected_imfs)
-            processing_steps.append(f"LMD({len(selected_imfs)} components)")
-            print(f"LMD 完成，选中 {len(selected_imfs)} 个分量")
-            
-        elif method == 'FastICA':
-            # FastICA 需要多通道输入
-            if current_signal.ndim == 1 or current_signal.shape[1] == 1:
-                print("警告：单通道信号无法执行 FastICA，跳过此步骤")
-                processing_steps.append("FastICA Skipped (single channel)")
-            else:
-                print(f"执行 FastICA 分离...")
+    # Apply processing methods sequentially
+    for idx, method in enumerate(processing_methods):
+        try:
+            if method == 'LCD':
+                report_progress(idx + 1, f"执行 LCD 分解 (目标分量数：{num_components})")
+                isc_components = local_characteristic_scale_decomposition(
+                    current_signal, t, num_components=num_components
+                )
                 
-                # 处理 NaN 值
+                # Limit the number of components to prevent dimension explosion
+                n_components_to_use = min(len(isc_components), num_components)
+                isc_components = isc_components[:n_components_to_use]
+                
+                current_signal = np.column_stack(isc_components)
+                processing_steps.append(f"LCD({n_components_to_use})")
+                logger.info(f"LCD 完成，生成 {n_components_to_use} 个分量")
+                
+            elif method == 'VMD':
+                if not VMD_AVAILABLE:
+                    raise ImportError("vmdpy 库未安装，无法执行 VMD 分解。请运行：pip install vmdpy")
+                
+                report_progress(idx + 1, f"执行 VMD 分解 (模态数：{num_components})")
+                imfs = vmd_decomposition(current_signal, fs, K=num_components)
+                
+                selected_imfs = select_correlated_components(imfs, current_signal)
+                n_components_to_use = min(len(selected_imfs), num_components)
+                selected_imfs = selected_imfs[:n_components_to_use]
+                
+                current_signal = np.column_stack(selected_imfs)
+                processing_steps.append(f"VMD({n_components_to_use})")
+                logger.info(f"VMD 完成，选中 {n_components_to_use} 个分量")
+                
+            elif method == 'EEMD':
+                if not EEMD_AVAILABLE:
+                    raise ImportError("PyEMD 库未安装，无法执行 EEMD 分解。请运行：pip install PyEMD")
+                
+                report_progress(idx + 1, f"执行 EEMD 分解 (最大 IMF 数：{num_components})")
+                imfs = eemd_decomposition(current_signal, fs, max_imf=num_components)
+                
+                selected_imfs = select_correlated_components(imfs, current_signal)
+                n_components_to_use = min(len(selected_imfs), num_components)
+                selected_imfs = selected_imfs[:n_components_to_use]
+                
+                current_signal = np.column_stack(selected_imfs)
+                processing_steps.append(f"EEMD({n_components_to_use})")
+                logger.info(f"EEMD 完成，选中 {n_components_to_use} 个分量")
+                
+            elif method == 'LMD':
+                if not LMD_AVAILABLE:
+                    raise ImportError("PyLMD 库未安装，无法执行 LMD 分解。请运行：pip install PyLMD")
+                
+                report_progress(idx + 1, "执行 LMD 分解")
+                imfs = lmd_decomposition(current_signal, fs)
+                
+                selected_imfs = select_correlated_components(imfs, current_signal)
+                n_components_to_use = min(len(selected_imfs), num_components)
+                selected_imfs = selected_imfs[:n_components_to_use]
+                
+                current_signal = np.column_stack(selected_imfs)
+                processing_steps.append(f"LMD({n_components_to_use})")
+                logger.info(f"LMD 完成，选中 {n_components_to_use} 个分量")
+                
+            elif method == 'FastICA':
+                # Check if signal has enough channels for FastICA
+                if current_signal.ndim == 1 or current_signal.shape[1] < 2:
+                    logger.warning("单通道信号无法执行 FastICA，跳过此步骤")
+                    processing_steps.append("FastICA_Skipped")
+                    continue
+                
+                report_progress(idx + 1, f"执行 FastICA 分离 (分量数：{min(num_components, current_signal.shape[1])})")
+                
+                # Handle NaN values
                 imputer = SimpleImputer(strategy='mean')
                 signal_imputed = imputer.fit_transform(current_signal)
                 
-                # 中心化
-                signal_centered = signal_imputed - np.mean(signal_imputed, axis=0)
-                
-                # 白化
-                scaler = StandardScaler(with_mean=False, with_std=True)
-                signal_whitened = scaler.fit_transform(signal_centered)
-                
-                # 执行 FastICA
-                ica_n_components = min(num_components, signal_whitened.shape[1])
+                # FastICA handles centering and whitening internally
+                # Only standardize if needed for numerical stability
+                ica_n_components = min(num_components, signal_imputed.shape[1])
                 ica = FastICA(n_components=ica_n_components, random_state=0, tol=1e-4, max_iter=500)
-                signal_ica = ica.fit_transform(signal_whitened)
+                signal_ica = ica.fit_transform(signal_imputed)
                 
                 current_signal = signal_ica
-                processing_steps.append(f"FastICA({current_signal.shape[1]} components)")
-                print(f"FastICA 完成，输出 {current_signal.shape[1]} 个成分")
+                processing_steps.append(f"FastICA({current_signal.shape[1]})")
+                logger.info(f"FastICA 完成，输出 {current_signal.shape[1]} 个成分")
+        
+        except Exception as e:
+            logger.error(f"处理步骤 {method} 失败：{str(e)}")
+            raise RuntimeError(f"处理方法 '{method}' 执行失败：{str(e)}") from e
     
-    # 如果最终是单通道，reshape 为 2D 数组
+    # Ensure output is 2D array
     if current_signal.ndim == 1:
         current_signal = current_signal.reshape(-1, 1)
     
@@ -625,13 +641,19 @@ def process_signal_pipeline(file_path, output_path, sampling_rate, processing_me
         'time_vector': t
     }
     
-    # 保存结果
+    # Save results
     ica_result_dict = {
         'ICA_Components': current_signal,
         'Processing_Info': processing_info,
         'Processing_Steps': '_'.join(processing_steps)
     }
-    savemat(output_path, ica_result_dict)
-    print(f'处理结果已保存至 {output_path}')
+    
+    try:
+        savemat(output_path, ica_result_dict)
+        logger.info(f'处理结果已保存至 {output_path}')
+    except Exception as e:
+        raise RuntimeError(f"保存 MAT 文件失败：{str(e)}") from e
+    
+    report_progress(len(processing_methods), "处理完成")
     
     return current_signal, processing_info

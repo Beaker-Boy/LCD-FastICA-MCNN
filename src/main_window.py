@@ -1,21 +1,24 @@
 import sys
 import os
 import time
+import logging
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QPushButton, QLabel, 
                              QLineEdit, QFileDialog, QVBoxLayout, QWidget, 
                              QMessageBox, QComboBox, QTableWidget, QTableWidgetItem,
-                             QHBoxLayout, QHeaderView, QGroupBox)
+                             QHBoxLayout, QHeaderView, QGroupBox, QProgressBar)
 from PyQt5.QtCore import Qt
 
-# It's better to have other modules not create plots automatically.
-# This should be controlled by the main application.
-# For now, we assume they are refactored to not show plots.
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 from lcd_fastica import process_signal_pipeline, fast_ica_processing
 from build_tensor import build_tensor_data
 from train_model import train_model
 
 # Define available processing methods
-PROCESSING_METHODS = ['None', 'LCD', 'FastICA', 'VMD', 'EEMD', 'LMD']
+DECOMPOSITION_METHODS = ['LCD', 'VMD', 'EEMD', 'LMD']
+POST_PROCESSING_METHODS = ['None', 'FastICA']
 
 # --- Directory Setup ---
 # Get the absolute path of the directory containing this script (src)
@@ -62,24 +65,29 @@ class MainWindow(QMainWindow):
         self.combo_label = QComboBox()
         self.combo_label.addItems(self.label_map.keys())
         
-        # --- Processing Method Selection (up to 4 methods in sequence) ---
-        processing_group = QGroupBox("信号处理方法配置（按顺序选择最多 4 种方法）")
+        # --- Processing Method Selection (Redesigned for single decomposition + optional FastICA) ---
+        processing_group = QGroupBox("信号处理方法配置（一种分解方法 + 可选 FastICA）")
         processing_layout = QVBoxLayout()
         
-        self.method_combos = []
-        for i in range(4):
-            method_layout = QHBoxLayout()
-            method_label = QLabel(f"步骤 {i+1}:")
-            method_combo = QComboBox()
-            method_combo.addItems(PROCESSING_METHODS)
-            method_combo.setCurrentIndex(0)  # Default to 'None'
-            
-            method_layout.addWidget(method_label)
-            method_layout.addWidget(method_combo)
-            method_layout.addStretch()
-            
-            processing_layout.addLayout(method_layout)
-            self.method_combos.append(method_combo)
+        # First combo: Select ONE decomposition method
+        decomp_layout = QHBoxLayout()
+        decomp_label = QLabel("分解方法:")
+        self.combo_decomposition = QComboBox()
+        self.combo_decomposition.addItems(DECOMPOSITION_METHODS)
+        self.combo_decomposition.setToolTip("选择一种信号分解方法")
+        decomp_layout.addWidget(decomp_label)
+        decomp_layout.addWidget(self.combo_decomposition, 1)
+        processing_layout.addLayout(decomp_layout)
+        
+        # Second combo: Optional FastICA
+        ica_layout = QHBoxLayout()
+        ica_label = QLabel("后处理:")
+        self.combo_ica = QComboBox()
+        self.combo_ica.addItems(['无', 'FastICA'])
+        self.combo_ica.setToolTip("可选择是否使用 FastICA 进行独立成分分析")
+        ica_layout.addWidget(ica_label)
+        ica_layout.addWidget(self.combo_ica, 1)
+        processing_layout.addLayout(ica_layout)
         
         processing_group.setLayout(processing_layout)
         
@@ -136,7 +144,6 @@ class MainWindow(QMainWindow):
         add_batch_layout.addWidget(self.label_label)
         add_batch_layout.addWidget(self.combo_label)
         add_batch_layout.addWidget(self.button_add_to_batch, 1)
-        add_batch_layout.addWidget(self.button_add_to_batch, 1)
 
         main_layout.addWidget(self.label_file)
         main_layout.addLayout(file_selection_layout)
@@ -151,6 +158,14 @@ class MainWindow(QMainWindow):
 
         main_layout.addWidget(self.label_batch)
         main_layout.addWidget(self.table_batch)
+        
+        # Progress bar for batch processing
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        self.progress_label = QLabel("处理进度：")
+        self.progress_label.setVisible(False)
+        main_layout.addWidget(self.progress_label)
+        main_layout.addWidget(self.progress_bar)
 
         main_layout.addSpacing(20)
 
@@ -196,15 +211,16 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "警告", "请选择一个有效的 NPY 文件")
             return
         
-        # Collect selected processing methods (only non-None methods)
-        selected_methods = []
-        for combo in self.method_combos:
-            method = combo.currentText()
-            if method != 'None':
-                selected_methods.append(method)
+        # Collect selected processing methods from new UI
+        decomp_method = self.combo_decomposition.currentText()
+        ica_method = self.combo_ica.currentText()
         
-        # Create a description of the processing pipeline
-        pipeline_desc = ' -> '.join(selected_methods) if selected_methods else '无处理'
+        # Build processing methods list
+        selected_methods = [decomp_method]
+        if ica_method == 'FastICA':
+            selected_methods.append('FastICA')
+        
+        pipeline_desc = ' + '.join(selected_methods)
 
         row_count = self.table_batch.rowCount()
         self.table_batch.insertRow(row_count)
@@ -215,25 +231,39 @@ class MainWindow(QMainWindow):
         item.setData(Qt.UserRole, selected_methods)
         self.table_batch.setItem(row_count, 2, QTableWidgetItem("待处理"))
         
-        print(f"Added to batch: {file_path} with label '{label}' and processing pipeline: {pipeline_desc}")
+        logger.info(f"Added to batch: {file_path} with label '{label}' and processing pipeline: {pipeline_desc}")
 
+    def progress_callback(self, current_step, total_steps, message):
+        """Progress callback function for signal processing"""
+        # Update progress bar if available
+        if hasattr(self, 'progress_bar'):
+            self.progress_bar.setValue(int((current_step / max(total_steps, 1)) * 100))
+            self.progress_label.setText(f"处理进度：{message}")
+            QApplication.processEvents()
+    
     def process_batch(self):
-        # --- 1. Validation ---
-        if self.table_batch.rowCount() == 0:
-            QMessageBox.warning(self, "警告", "批处理列表为空，请先添加文件。")
-            return
-            
-        new_model_name = self.line_edit_new_model.text()
-        if not new_model_name or not new_model_name.endswith('.pth'):
-            QMessageBox.warning(self, "警告", "请输入有效的新模型名称，必须以 .pth 结尾。")
-            return
-        new_model_path = os.path.join(MODELS_DIR, new_model_name)
-
-        # --- 2. Step 1: Process all NPY files to MAT files ---
-        mat_file_list = []
-        label_list_for_build = []
+        # Show progress bar
+        if hasattr(self, 'progress_bar'):
+            self.progress_bar.setVisible(True)
+            self.progress_label.setVisible(True)
+            self.progress_bar.setValue(0)
         
         try:
+            # --- 1. Validation ---
+            if self.table_batch.rowCount() == 0:
+                QMessageBox.warning(self, "警告", "批处理列表为空，请先添加文件。")
+                return
+                
+            new_model_name = self.line_edit_new_model.text()
+            if not new_model_name or not new_model_name.endswith('.pth'):
+                QMessageBox.warning(self, "警告", "请输入有效的新模型名称，必须以 .pth 结尾。")
+                return
+            new_model_path = os.path.join(MODELS_DIR, new_model_name)
+
+            # --- 2. Step 1: Process all NPY files to MAT files ---
+            mat_file_list = []
+            label_list_for_build = []
+            
             sampling_rate_text = self.line_edit_sampling_rate.text()
             if not sampling_rate_text.isdigit() or int(sampling_rate_text) <= 0:
                 QMessageBox.warning(self, "警告", "请输入一个有效的正整数作为采样率。")
@@ -246,8 +276,10 @@ class MainWindow(QMainWindow):
                 return
             max_samples = int(max_samples_text)
 
-            QApplication.processEvents() # Update UI
-            for row in range(self.table_batch.rowCount()):
+            QApplication.processEvents()
+            total_files = self.table_batch.rowCount()
+            
+            for row in range(total_files):
                 npy_path = self.table_batch.item(row, 0).text()
                 label_str = self.table_batch.item(row, 1).text()
                 
@@ -255,8 +287,13 @@ class MainWindow(QMainWindow):
                 status_item = self.table_batch.item(row, 2)
                 selected_methods = status_item.data(Qt.UserRole) if status_item else []
 
-                pipeline_text = ' -> '.join(selected_methods) if selected_methods else '无'
+                pipeline_text = ' + '.join(selected_methods)
                 self.table_batch.item(row, 2).setText(f"正在处理 ({pipeline_text})...")
+                
+                # Update global progress
+                if hasattr(self, 'progress_bar'):
+                    self.progress_bar.setValue(int((row / total_files) * 100))
+                    self.progress_label.setText(f"文件 {row+1}/{total_files}: {os.path.basename(npy_path)}")
                 QApplication.processEvents()
 
                 # Create unique output path for the .mat file
@@ -265,45 +302,61 @@ class MainWindow(QMainWindow):
                 mat_file_name = f"{file_name_no_ext}_{int(time.time())}.mat"
                 mat_output_path = os.path.join(ICA_RESULTS_DIR, mat_file_name)
                 
-                print(f"\nProcessing {npy_path} -> {mat_output_path}")
-                print(f"Processing pipeline: {' -> '.join(selected_methods) if selected_methods else 'None'}")
+                logger.info(f"\nProcessing {npy_path} -> {mat_output_path}")
+                logger.info(f"Processing pipeline: {' + '.join(selected_methods)}")
                 
-                # Use the new flexible pipeline
-                if selected_methods:
+                try:
+                    # Use the new flexible pipeline with progress callback
                     process_signal_pipeline(
                         file_path=npy_path,
                         output_path=mat_output_path,
                         sampling_rate=sampling_rate,
                         processing_methods=selected_methods,
-                        max_samples=max_samples
+                        max_samples=max_samples,
+                        progress_callback=self.progress_callback
                     )
-                else:
-                    # If no methods selected, use default LCD+FastICA for backward compatibility
-                    fast_ica_processing(npy_path, mat_output_path, sampling_rate, max_samples=max_samples)
+                except ImportError as e:
+                    logger.error(f"依赖库缺失：{str(e)}")
+                    QMessageBox.critical(self, "错误", 
+                        f"处理文件 {npy_path} 时依赖库缺失:\n{str(e)}\n\n请安装所需依赖后重试。")
+                    return
+                except ValueError as e:
+                    logger.error(f"参数验证失败：{str(e)}")
+                    QMessageBox.critical(self, "错误", f"处理方法配置错误:\n{str(e)}")
+                    return
+                except RuntimeError as e:
+                    logger.error(f"处理失败：{str(e)}")
+                    QMessageBox.critical(self, "错误", f"处理文件 {npy_path} 时出错:\n{str(e)}")
+                    return
                 
                 mat_file_list.append(mat_output_path)
                 label_list_for_build.append(self.label_map[label_str])
                 
-                self.table_batch.item(row, 2).setText("ICA完成")
+                self.table_batch.item(row, 2).setText("ICA 完成")
                 QApplication.processEvents()
             
-            print("All files processed to .mat format.")
+            logger.info("All files processed to .mat format.")
 
             # --- 3. Step 2: Build Tensor Dataset from MAT files ---
-            print("Building tensor dataset...")
-            QMessageBox.information(self, "进度", "ICA处理完成，即将开始构建张量数据集。")
+            logger.info("Building tensor dataset...")
+            if hasattr(self, 'progress_bar'):
+                self.progress_bar.setValue(75)
+                self.progress_label.setText("构建张量数据集...")
+            QApplication.processEvents()
+            
             build_tensor_data(mat_file_list, label_list_for_build, TENSOR_DATA_DIR)
-            print("Tensor dataset built successfully.")
+            logger.info("Tensor dataset built successfully.")
 
             # --- 4. Step 3: Train the model ---
-            print("Starting model training...")
-            QMessageBox.information(self, "进度", "数据集构建完成，即将开始训练模型。")
+            logger.info("Starting model training...")
+            if hasattr(self, 'progress_bar'):
+                self.progress_bar.setValue(90)
+                self.progress_label.setText("训练模型中...")
+            QApplication.processEvents()
             
             train_mode = self.combo_train_mode.currentText()
             existing_model_path = self.line_edit_existing_model.text() if train_mode == '读取已有模型继续训练' else None
             
-            # The train_model function needs to be adapted to this new flow
-            # It no longer needs 'selected_label'
             train_model(
                 folder_path=TENSOR_DATA_DIR, 
                 train_mode=train_mode, 
@@ -311,13 +364,22 @@ class MainWindow(QMainWindow):
                 new_model_path=new_model_path
             )
             
-            QMessageBox.information(self, "成功", f"处理和训练全部完成！\n模型已保存至: {new_model_path}")
+            if hasattr(self, 'progress_bar'):
+                self.progress_bar.setValue(100)
+                self.progress_label.setText("全部完成!")
+            
+            QMessageBox.information(self, "成功", f"处理和训练全部完成！\n模型已保存至：{new_model_path}")
 
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"处理过程中发生错误: {str(e)}")
+            logger.error(f"处理过程中发生错误：{str(e)}", exc_info=True)
+            QMessageBox.critical(self, "错误", f"处理过程中发生错误：{str(e)}")
             import traceback
             traceback.print_exc()
-
+        finally:
+            # Hide progress bar after completion or error
+            if hasattr(self, 'progress_bar'):
+                self.progress_bar.setVisible(False)
+                self.progress_label.setVisible(False)
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = MainWindow()

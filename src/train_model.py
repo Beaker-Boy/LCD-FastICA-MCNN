@@ -26,18 +26,30 @@ def train_model(folder_path, train_mode, existing_model_path, new_model_path):
     print(f"Loaded training labels with shape: {train_labels.shape}")
     print(f"Loaded validation labels with shape: {val_labels.shape}")
 
-    # 创建数据集和数据加载器
-    train_dataset = TensorDataset(train_tensor_data, train_labels)
-    val_dataset = TensorDataset(val_tensor_data, val_labels)
-
-    batch_size = 16
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-
     # 初始化模型、损失函数和优化器
     num_channels = train_tensor_data.shape[1]
     # 动态确定类别数量
-    num_classes = len(torch.unique(train_labels))
+    unique_classes = torch.unique(train_labels)
+    num_classes = len(unique_classes)
+    
+    # 创建标签映射字典，将原始标签映射到连续的范围 [0, num_classes-1]
+    class_to_idx = {cls.item(): idx for idx, cls in enumerate(unique_classes)}
+    print(f"Label mapping: {class_to_idx}")
+    
+    # 应用标签映射
+    train_labels_mapped = train_labels.clone()
+    val_labels_mapped = val_labels.clone()
+    for original_label, mapped_idx in class_to_idx.items():
+        train_labels_mapped[train_labels == original_label] = mapped_idx
+        val_labels_mapped[val_labels == original_label] = mapped_idx
+    
+    # 使用映射后的标签重新创建数据集
+    train_dataset = TensorDataset(train_tensor_data, train_labels_mapped)
+    val_dataset = TensorDataset(val_tensor_data, val_labels_mapped)
+    
+    batch_size = 16
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     
     if train_mode == '读取已有模型继续训练':
         model = MSASCnn(num_channels, num_classes)
@@ -76,7 +88,7 @@ def train_model(folder_path, train_mode, existing_model_path, new_model_path):
                 loss = criterion(outputs, batch_labels)
                 val_running_loss += loss.item()
                 
-                # 计算准确率
+                # 计算准确率（使用映射后的标签）
                 _, predicted = torch.max(outputs.data, 1)
                 total += batch_labels.size(0)
                 correct += (predicted == batch_labels).sum().item()
@@ -88,6 +100,11 @@ def train_model(folder_path, train_mode, existing_model_path, new_model_path):
 
     print("训练完成")
 
-    # 保存训练好的模型
+    # 保存训练好的模型和标签映射
     torch.save(model.state_dict(), new_model_path)
     print(f"Model saved to {new_model_path}")
+    
+    # 保存标签映射字典，用于后续推理
+    mapping_path = new_model_path.replace('.pth', '_label_mapping.pt')
+    torch.save(class_to_idx, mapping_path)
+    print(f"Label mapping saved to {mapping_path}")
