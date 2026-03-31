@@ -15,7 +15,7 @@ from build_tensor import build_tensor_data
 from train_model import train_model
 
 # Define available processing methods
-PROCESSING_METHODS = ['None', 'LCD', 'FastICA']
+PROCESSING_METHODS = ['None', 'LCD', 'FastICA', 'VMD', 'EEMD', 'LMD']
 
 # --- Directory Setup ---
 # Get the absolute path of the directory containing this script (src)

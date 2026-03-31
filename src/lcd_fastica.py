@@ -9,6 +9,29 @@ from sklearn.decomposition import FastICA
 from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
 
+# Try to import optional decomposition libraries
+try:
+    from vmdpy import VMD
+    VMD_AVAILABLE = True
+except ImportError:
+    VMD_AVAILABLE = False
+    print("Warning: vmdpy not installed. VMD method will not be available.")
+
+try:
+    from PyEMD import EEMD
+    EEMD_AVAILABLE = True
+except ImportError:
+    EEMD_AVAILABLE = False
+    print("Warning: PyEMD not installed. EEMD method will not be available.")
+
+try:
+    from PyLMD import LMD
+    LMD_AVAILABLE = True
+except ImportError:
+    LMD_AVAILABLE = False
+    print("Warning: PyLMD not installed. LMD method will not be available.")
+
+
 def linear_transform(x, t, m):
     """
     线性变换函数，用于构建基线
@@ -119,6 +142,221 @@ def extreme_monotonicity_criterion(x):
             break
 
     return is_monotonic
+
+def vmd_decomposition(signal, fs, K=5, alpha=2000, tau=0.001):
+    """
+    变分模态分解 (VMD)
+    
+    Args:
+        signal: 输入信号
+        fs: 采样频率
+        K: 模态数量
+        alpha: 惩罚因子
+        tau: 噪声容忍度
+    
+    Returns:
+        imfs: 分解得到的本征模态函数数组
+    """
+    if not VMD_AVAILABLE:
+        raise ImportError("vmdpy 库未安装，无法执行 VMD 分解")
+    
+    DC = 0
+    init = 1
+    tol = 1e-7
+    
+    # 执行 VMD 分解
+    imfs, u, u_hat = VMD(signal, alpha, tau, K, DC, init, tol)
+    
+    print(f"VMD 分解完成，生成 {imfs.shape[0]} 个 IMF 分量")
+    
+    # 计算重构信号和相关系数
+    reconstructed_signal = np.sum(imfs, axis=0)
+    correlation_coefficient = np.corrcoef(signal, reconstructed_signal)[0, 1]
+    print(f"VMD 重构信号与原信号的相关系数：{correlation_coefficient:.4f}")
+    
+    # 打印每个 IMF 的相关信息
+    for i in range(imfs.shape[0]):
+        corr = np.corrcoef(signal, imfs[i])[0, 1]
+        print(f"IMF {i+1} 相关系数：{corr:.4f}")
+    
+    return imfs
+
+def eemd_decomposition(signal, fs, max_imf=3):
+    """
+    集成经验模态分解 (EEMD)
+    
+    Args:
+        signal: 输入信号
+        fs: 采样频率
+        max_imf: 最大 IMF 数量
+    
+    Returns:
+        imfs: 分解得到的本征模态函数数组
+    """
+    if not EEMD_AVAILABLE:
+        raise ImportError("PyEMD 库未安装，无法执行 EEMD 分解")
+    
+    eemd = EEMD(max_imf=max_imf)
+    imfs = eemd(signal)
+    
+    print(f"EEMD 分解完成，生成 {imfs.shape[0]} 个 IMF 分量")
+    
+    # 计算重构信号和相关系数
+    reconstructed_signal = np.sum(imfs, axis=0)
+    correlation_coefficient = np.corrcoef(signal, reconstructed_signal)[0, 1]
+    print(f"EEMD 重构信号与原信号的相关系数：{correlation_coefficient:.4f}")
+    
+    # 打印每个 IMF 的相关信息
+    for i in range(imfs.shape[0]):
+        corr = np.corrcoef(signal, imfs[i])[0, 1]
+        print(f"IMF {i+1} 相关系数：{corr:.4f}")
+    
+    return imfs
+
+def lmd_decomposition(signal, fs):
+    """
+    局部均值分解 (LMD)
+    
+    Args:
+        signal: 输入信号
+        fs: 采样频率
+    
+    Returns:
+        imfs: 分解得到的本征模态函数数组
+    """
+    if not LMD_AVAILABLE:
+        raise ImportError("PyLMD 库未安装，无法执行 LMD 分解")
+    
+    lmd = LMD()
+    result = lmd.lmd(signal)
+    # LMD 返回的结果是元组，第一个元素是 IMF 数组
+    imfs = result[0]
+    
+    print(f"LMD 分解完成，生成 {imfs.shape[0]} 个 PF 分量")
+    
+    # 计算重构信号和相关系数
+    reconstructed_signal = np.sum(imfs, axis=0)
+    correlation_coefficient = np.corrcoef(signal, reconstructed_signal)[0, 1]
+    print(f"LMD 重构信号与原信号的相关系数：{correlation_coefficient:.4f}")
+    
+    # 打印每个 PF 分量的相关信息
+    for i in range(imfs.shape[0]):
+        corr = np.corrcoef(signal, imfs[i])[0, 1]
+        print(f"PF {i+1} 相关系数：{corr:.4f}")
+    
+    return imfs
+
+def select_correlated_components(imfs, signal, threshold=0.5):
+    """
+    根据相关系数选择有效的分解分量
+    
+    Args:
+        imfs: 分解得到的本征模态函数数组
+        signal: 原始信号
+        threshold: 相关系数阈值
+    
+    Returns:
+        selected_imfs: 选中的分量数组
+    """
+    # 计算每个 IMF 与原始信号的相关系数
+    correlation_coeffs = [np.corrcoef(signal, imfs[i])[0, 1] for i in range(len(imfs))]
+    correlation_coeffs = np.array(correlation_coeffs)
+    
+    # 选择相关系数大于阈值的 IMF
+    selected_indices = [i for i, coeff in enumerate(correlation_coeffs) if coeff > threshold]
+    selected_imfs = imfs[selected_indices]
+    
+    # 如果没有相关系数大于阈值的 IMF，则选择相关系数最大的那个 IMF
+    if selected_imfs.shape[0] == 0:
+        max_corr_index = np.argmax(correlation_coeffs)
+        selected_imfs = imfs[max_corr_index:max_corr_index + 1]
+        print(f"没有相关系数大于 {threshold} 的分量，选择相关系数最大的分量 (索引：{max_corr_index})")
+    
+    return selected_imfs
+
+
+if __name__ == "__main__":
+    """
+    测试脚本：验证 VMD、EEMD、LMD 方法是否可用
+    """
+    print("=" * 60)
+    print("信号处理方法可用性检查")
+    print("=" * 60)
+    
+    print(f"\nVMD 方法：{'✓ 可用' if VMD_AVAILABLE else '✗ 不可用 (需要安装 vmdpy)'}")
+    print(f"EEMD 方法：{'✓ 可用' if EEMD_AVAILABLE else '✗ 不可用 (需要安装 PyEMD)'}")
+    print(f"LMD 方法：{'✓ 可用' if LMD_AVAILABLE else '✗ 不可用 (需要安装 PyLMD)'}")
+    
+    print("\n" + "=" * 60)
+    print("可用的处理方法列表:")
+    print("  - None (无处理)")
+    print("  - LCD (局部特征尺度分解)")
+    print("  - FastICA (快速独立成分分析)")
+    if VMD_AVAILABLE:
+        print("  - VMD (变分模态分解)")
+    if EEMD_AVAILABLE:
+        print("  - EEMD (集成经验模态分解)")
+    if LMD_AVAILABLE:
+        print("  - LMD (局部均值分解)")
+    print("=" * 60)
+    
+    # 生成一个简单的测试信号
+    print("\n生成测试信号...")
+    fs = 20000  # 采样率 20kHz
+    t = np.linspace(0, 1, fs)  # 1 秒的信号
+    
+    # 创建一个包含多个频率成分的复合信号
+    f1, f2, f3 = 50, 200, 500  # 信号频率
+    test_signal = (0.5 * np.sin(2 * np.pi * f1 * t) + 
+                   0.3 * np.sin(2 * np.pi * f2 * t) + 
+                   0.2 * np.sin(2 * np.pi * f3 * t))
+    
+    # 添加一些噪声
+    noise = 0.1 * np.random.randn(len(t))
+    test_signal += noise
+    
+    print(f"测试信号长度：{len(test_signal)} 采样点")
+    print(f"测试信噪比：{np.std(test_signal - noise) / np.std(noise):.2f}")
+    
+    # 测试 VMD 方法
+    if VMD_AVAILABLE:
+        print("\n" + "-" * 60)
+        print("测试 VMD 分解...")
+        try:
+            imfs_vmd = vmd_decomposition(test_signal, fs, K=5)
+            print(f"✓ VMD 分解成功，得到 {imfs_vmd.shape[0]} 个 IMF 分量")
+            selected_vmd = select_correlated_components(imfs_vmd, test_signal)
+            print(f"✓ 选择 {selected_vmd.shape[0]} 个相关分量")
+        except Exception as e:
+            print(f"✗ VMD 测试失败：{e}")
+    
+    # 测试 EEMD 方法
+    if EEMD_AVAILABLE:
+        print("\n" + "-" * 60)
+        print("测试 EEMD 分解...")
+        try:
+            imfs_eemd = eemd_decomposition(test_signal, fs, max_imf=5)
+            print(f"✓ EEMD 分解成功，得到 {imfs_eemd.shape[0]} 个 IMF 分量")
+            selected_eemd = select_correlated_components(imfs_eemd, test_signal)
+            print(f"✓ 选择 {selected_eemd.shape[0]} 个相关分量")
+        except Exception as e:
+            print(f"✗ EEMD 测试失败：{e}")
+    
+    # 测试 LMD 方法
+    if LMD_AVAILABLE:
+        print("\n" + "-" * 60)
+        print("测试 LMD 分解...")
+        try:
+            imfs_lmd = lmd_decomposition(test_signal, fs)
+            print(f"✓ LMD 分解成功，得到 {imfs_lmd.shape[0]} 个 PF 分量")
+            selected_lmd = select_correlated_components(imfs_lmd, test_signal)
+            print(f"✓ 选择 {selected_lmd.shape[0]} 个相关分量")
+        except Exception as e:
+            print(f"✗ LMD 测试失败：{e}")
+    
+    print("\n" + "=" * 60)
+    print("测试完成!")
+    print("=" * 60)
 
 def fast_ica_processing(file_path, output_path, sampling_rate, num_components=10, max_samples=None):
     """
@@ -310,6 +548,42 @@ def process_signal_pipeline(file_path, output_path, sampling_rate, processing_me
             current_signal = np.column_stack(isc_components)
             processing_steps.append(f"LCD({len(isc_components)} components)")
             print(f"LCD 完成，生成 {len(isc_components)} 个分量")
+            
+        elif method == 'VMD':
+            print(f"执行 VMD 分解...")
+            imfs = vmd_decomposition(current_signal, fs, K=num_components)
+            
+            # 选择相关系数高的分量
+            selected_imfs = select_correlated_components(imfs, current_signal)
+            
+            # 将选中的 IMF 分量堆叠
+            current_signal = np.column_stack(selected_imfs)
+            processing_steps.append(f"VMD({len(selected_imfs)} components)")
+            print(f"VMD 完成，选中 {len(selected_imfs)} 个分量")
+            
+        elif method == 'EEMD':
+            print(f"执行 EEMD 分解...")
+            imfs = eemd_decomposition(current_signal, fs, max_imf=num_components)
+            
+            # 选择相关系数高的分量
+            selected_imfs = select_correlated_components(imfs, current_signal)
+            
+            # 将选中的 IMF 分量堆叠
+            current_signal = np.column_stack(selected_imfs)
+            processing_steps.append(f"EEMD({len(selected_imfs)} components)")
+            print(f"EEMD 完成，选中 {len(selected_imfs)} 个分量")
+            
+        elif method == 'LMD':
+            print(f"执行 LMD 分解...")
+            imfs = lmd_decomposition(current_signal, fs)
+            
+            # 选择相关系数高的分量
+            selected_imfs = select_correlated_components(imfs, current_signal)
+            
+            # 将选中的 PF 分量堆叠
+            current_signal = np.column_stack(selected_imfs)
+            processing_steps.append(f"LMD({len(selected_imfs)} components)")
+            print(f"LMD 完成，选中 {len(selected_imfs)} 个分量")
             
         elif method == 'FastICA':
             # FastICA 需要多通道输入
