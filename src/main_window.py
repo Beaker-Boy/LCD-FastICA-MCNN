@@ -99,7 +99,10 @@ class MainWindow(QMainWindow):
         self.table_batch = QTableWidget()
         self.table_batch.setColumnCount(3)
         self.table_batch.setHorizontalHeaderLabels(["NPY 文件路径", "标签", "状态"])
-        self.table_batch.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        # Fix: Add type assertion for horizontalHeader()
+        header = self.table_batch.horizontalHeader()
+        if header is not None:
+            header.setSectionResizeMode(0, QHeaderView.Stretch)
         self.table_batch.setAlternatingRowColors(True)
 
         # --- Bottom Level: Training Setup and Execution ---
@@ -228,7 +231,8 @@ class MainWindow(QMainWindow):
         self.table_batch.setItem(row_count, 1, QTableWidgetItem(label))
         # Store the processing methods list in userData of the status item (column 2)
         status_item = QTableWidgetItem("待处理")
-        status_item.setData(Qt.UserRole, selected_methods)
+        # Fix: Add type assertion for Qt.UserRole
+        status_item.setData(Qt.UserRole, selected_methods)  # type: ignore[arg-type]
         self.table_batch.setItem(row_count, 2, status_item)
         
         logger.info(f"Added to batch: {file_path} with label '{label}' and processing pipeline: {pipeline_desc}")
@@ -280,19 +284,30 @@ class MainWindow(QMainWindow):
             total_files = self.table_batch.rowCount()
             
             for row in range(total_files):
-                npy_path = self.table_batch.item(row, 0).text()
-                label_str = self.table_batch.item(row, 1).text()
+                # Fix: Add None checks for table items
+                file_item = self.table_batch.item(row, 0)
+                label_item = self.table_batch.item(row, 1)
+                status_item = self.table_batch.item(row, 2)
+                
+                if file_item is None or label_item is None or status_item is None:
+                    logger.error(f"Invalid table row {row}, skipping...")
+                    continue
+                
+                npy_path = file_item.text()
+                label_str = label_item.text()
                 
                 # Retrieve the processing methods for this file
-                status_item = self.table_batch.item(row, 2)
-                selected_methods = status_item.data(Qt.UserRole) if status_item else []
+                # Fix: Add type assertion for Qt.UserRole and data retrieval
+                selected_methods = status_item.data(Qt.UserRole) if status_item else []  # type: ignore[arg-type]
                 
                 # Ensure selected_methods is a valid list
-                if not selected_methods:
+                if not selected_methods or not isinstance(selected_methods, list):
                     selected_methods = []
                 
                 pipeline_text = ' + '.join(selected_methods) if selected_methods else "未指定方法"
-                self.table_batch.item(row, 2).setText(f"正在处理 ({pipeline_text})...")
+                # Fix: Add None check before calling setText
+                if status_item is not None:
+                    status_item.setText(f"正在处理 ({pipeline_text})...")
                 
                 # Update global progress
                 if hasattr(self, 'progress_bar'):
@@ -336,7 +351,10 @@ class MainWindow(QMainWindow):
                 mat_file_list.append(mat_output_path)
                 label_list_for_build.append(self.label_map[label_str])
                 
-                self.table_batch.item(row, 2).setText("ICA 完成")
+                # Fix: Add None check before calling setText
+                status_item_updated = self.table_batch.item(row, 2)
+                if status_item_updated is not None:
+                    status_item_updated.setText("ICA 完成")
                 QApplication.processEvents()
             
             logger.info("All files processed to .mat format.")

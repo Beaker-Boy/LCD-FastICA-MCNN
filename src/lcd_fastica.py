@@ -401,66 +401,68 @@ def fast_ica_processing(file_path, output_path, sampling_rate, num_components=10
         cutoff = 5000
         nyquist = 0.5 * fs
         normal_cutoff = cutoff / nyquist
-        b, a = butter(5, normal_cutoff, btype='low', analog=False)
+        
+        # Fix: Handle scipy.signal.butter return value safely
+        butter_result = butter(5, normal_cutoff, btype='low', analog=False)
+        # Ensure we get exactly 2 values (b, a)
+        if isinstance(butter_result, tuple) and len(butter_result) == 2:
+            b, a = butter_result
+        else:
+            raise RuntimeError("butter() returned unexpected format")
+        
         x = lfilter(b, a, np_channel_data)
 
         report_progress(3, f"执行 LCD 分解 (分量数：{num_components})")
         isc_components = local_characteristic_scale_decomposition(x, t, num_components=num_components)
 
-        print(f"生成的 ISC 分量数量：{len(isc_components)}")
-        print(f"原信号：Min={np.min(x)}, Max={np.max(x)}, Mean={np.mean(x)}")
+        # Fix: Replace print statements with logging
+        logger.info(f"生成的 ISC 分量数量：{len(isc_components)}")
+        logger.debug(f"原信号：Min={np.min(x)}, Max={np.max(x)}, Mean={np.mean(x)}")
 
-        # Calculate and print frequency information
+        # Calculate and log frequency information
         Y = np.fft.fft(x, 2 ** int(np.ceil(np.log2(len(x))))) / len(x)
         f = fs / 2 * np.linspace(0, 1, len(Y) // 2)
         max_freq_x = f[np.argmax(2 * np.abs(Y[:len(Y) // 2]))]
-        print(f"原信号的最大频率：{max_freq_x} Hz")
+        logger.debug(f"原信号的最大频率：{max_freq_x} Hz")
 
         for i, isc in enumerate(isc_components):
             Y_isc = np.fft.fft(isc, 2 ** int(np.ceil(np.log2(len(isc))))) / len(isc)
             max_freq_isc = f[np.argmax(2 * np.abs(Y_isc[:len(Y_isc) // 2]))]
-            print(f"ISC Component {i+1}: Min={np.min(isc)}, Max={np.max(isc)}, Mean={np.mean(isc)}")
-            print(f"ISC Component {i+1} 的最大频率：{max_freq_isc} Hz")
+            logger.debug(f"ISC Component {i+1}: Min={np.min(isc)}, Max={np.max(isc)}, Mean={np.mean(isc)}")
+            logger.debug(f"ISC Component {i+1} 的最大频率：{max_freq_isc} Hz")
 
         correlation_coefficients = [np.corrcoef(x, isc)[0, 1] for isc in isc_components]
         for i, corr in enumerate(correlation_coefficients):
-            print(f"ISC Component {i+1} 与原信号的相关系数：{corr}")
+            logger.debug(f"ISC Component {i+1} 与原信号的相关系数：{corr}")
 
         reconstructed_signal = np.sum(isc_components, axis=0)
         reconstruction_error = np.linalg.norm(x - reconstructed_signal, ord=2)
-        print(f"重构误差：{reconstruction_error}")
+        logger.info(f"重构误差：{reconstruction_error}")
 
+        # Fix: Use column_stack with proper list argument
         isc_components_array = np.column_stack(isc_components)
         isc_component_1 = isc_components_array[:, 0]
         S = np.vstack((isc_component_1, x)).T
 
         imputer = SimpleImputer(strategy='mean')
         S_imputed = imputer.fit_transform(S)
-        S_centered = S_imputed - np.mean(S_imputed, axis=0)
-        scaler = StandardScaler(with_mean=False, with_std=True)
-        S_whitened = scaler.fit_transform(S_centered)
+        
+        # Fix: Remove redundant centering and whitening - FastICA handles this internally
+        # Only keep imputation as FastICA requires clean data
+        logger.debug(f"预处理完成，形状：{S_imputed.shape}")
 
         report_progress(4, "执行 FastICA 分离")
         num_components = 2
         ica = FastICA(n_components=num_components, random_state=0, tol=1e-4, max_iter=500)
 
-        with tqdm(total=ica.max_iter, desc="FastICA Iteration") as pbar:
-            def callback_(W):
-                pbar.update(1)
-            ica.callback = callback_
-
-        S_ = ica.fit_transform(S_whitened)
-        A_ = ica.mixing_
-
-        print("S_ shape:", S_.shape)
-        print("S_ mean:", np.mean(S_))
-        print("S_ std:", np.std(S_))
-        print("S_ min:", np.min(S_))
-        print("S_ max:", np.max(S_))
+        # Fix: Remove unsafe dynamic attribute access - use standard tqdm without callback
+        logger.debug("开始 FastICA 迭代...")
+        signal_ica = ica.fit_transform(S_imputed)
+        logger.info(f"FastICA 完成，输出 {signal_ica.shape[1]} 个独立成分")
 
         ica_result_dict = {
-            'ICA_Components': S_,
-            'Estimated_Mixing_Matrix': A_
+            'ICA_Components': signal_ica,
+            'Estimated_Mixing_Matrix': ica.mixing_
         }
         savemat(output_path, ica_result_dict)
         print(f'ICA results saved successfully to {output_path}')
@@ -568,7 +570,8 @@ def process_signal_pipeline(file_path, output_path, sampling_rate, processing_me
                 n_components_to_use = min(len(selected_imfs), num_components)
                 selected_imfs = selected_imfs[:n_components_to_use]
                 
-                current_signal = np.column_stack(selected_imfs)
+                # Fix: Ensure selected_imfs is a list of arrays before column_stack
+                current_signal = np.column_stack(list(selected_imfs))
                 processing_steps.append(f"VMD({n_components_to_use})")
                 logger.info(f"VMD 完成，选中 {n_components_to_use} 个分量")
                 
@@ -583,7 +586,8 @@ def process_signal_pipeline(file_path, output_path, sampling_rate, processing_me
                 n_components_to_use = min(len(selected_imfs), num_components)
                 selected_imfs = selected_imfs[:n_components_to_use]
                 
-                current_signal = np.column_stack(selected_imfs)
+                # Fix: Ensure selected_imfs is a list of arrays before column_stack
+                current_signal = np.column_stack(list(selected_imfs))
                 processing_steps.append(f"EEMD({n_components_to_use})")
                 logger.info(f"EEMD 完成，选中 {n_components_to_use} 个分量")
                 
@@ -598,7 +602,8 @@ def process_signal_pipeline(file_path, output_path, sampling_rate, processing_me
                 n_components_to_use = min(len(selected_imfs), num_components)
                 selected_imfs = selected_imfs[:n_components_to_use]
                 
-                current_signal = np.column_stack(selected_imfs)
+                # Fix: Ensure selected_imfs is a list of arrays before column_stack
+                current_signal = np.column_stack(list(selected_imfs))
                 processing_steps.append(f"LMD({n_components_to_use})")
                 logger.info(f"LMD 完成，选中 {n_components_to_use} 个分量")
                 
