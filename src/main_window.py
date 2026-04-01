@@ -226,10 +226,10 @@ class MainWindow(QMainWindow):
         self.table_batch.insertRow(row_count)
         self.table_batch.setItem(row_count, 0, QTableWidgetItem(file_path))
         self.table_batch.setItem(row_count, 1, QTableWidgetItem(label))
-        # Store the processing methods list in userData
-        item = QTableWidgetItem(pipeline_desc)
-        item.setData(Qt.UserRole, selected_methods)
-        self.table_batch.setItem(row_count, 2, QTableWidgetItem("待处理"))
+        # Store the processing methods list in userData of the status item (column 2)
+        status_item = QTableWidgetItem("待处理")
+        status_item.setData(Qt.UserRole, selected_methods)
+        self.table_batch.setItem(row_count, 2, status_item)
         
         logger.info(f"Added to batch: {file_path} with label '{label}' and processing pipeline: {pipeline_desc}")
 
@@ -286,8 +286,12 @@ class MainWindow(QMainWindow):
                 # Retrieve the processing methods for this file
                 status_item = self.table_batch.item(row, 2)
                 selected_methods = status_item.data(Qt.UserRole) if status_item else []
-
-                pipeline_text = ' + '.join(selected_methods)
+                
+                # Ensure selected_methods is a valid list
+                if not selected_methods:
+                    selected_methods = []
+                
+                pipeline_text = ' + '.join(selected_methods) if selected_methods else "未指定方法"
                 self.table_batch.item(row, 2).setText(f"正在处理 ({pipeline_text})...")
                 
                 # Update global progress
@@ -303,7 +307,7 @@ class MainWindow(QMainWindow):
                 mat_output_path = os.path.join(ICA_RESULTS_DIR, mat_file_name)
                 
                 logger.info(f"\nProcessing {npy_path} -> {mat_output_path}")
-                logger.info(f"Processing pipeline: {' + '.join(selected_methods)}")
+                logger.info(f"Processing pipeline: {' + '.join(selected_methods) if selected_methods else 'None'}")
                 
                 try:
                     # Use the new flexible pipeline with progress callback
