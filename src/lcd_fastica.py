@@ -5,6 +5,7 @@ from nptdms import TdmsFile
 from scipy.io import savemat
 from scipy.signal import butter, lfilter
 import time
+import os
 from sklearn.decomposition import FastICA
 from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
@@ -452,8 +453,11 @@ def fast_ica_processing(file_path, output_path, sampling_rate, num_components=10
         logger.debug(f"预处理完成，形状：{S_imputed.shape}")
 
         report_progress(4, "执行 FastICA 分离")
-        num_components = 2
-        ica = FastICA(n_components=num_components, random_state=0, tol=1e-4, max_iter=500)
+        # Fix: Use the num_components parameter instead of hardcoding to 2
+        # Ensure n_components does not exceed the number of input channels
+        ica_n_components = min(num_components, S_imputed.shape[1])
+        logger.info(f"FastICA 设置分量数：{ica_n_components}")
+        ica = FastICA(n_components=ica_n_components, random_state=0, tol=1e-4, max_iter=500)
 
         # Fix: Remove unsafe dynamic attribute access - use standard tqdm without callback
         logger.debug("开始 FastICA 迭代...")
@@ -473,8 +477,67 @@ def fast_ica_processing(file_path, output_path, sampling_rate, num_components=10
         logger.error(f"fast_ica_processing 失败：{str(e)}")
         raise
 
+def plot_intermediate_results(signal, components, method_name, file_basename, save_dir=None):
+    """
+    绘制中间处理结果的图线
+    
+    Args:
+        signal: 原始信号
+        components: 分解/分离后的分量数组 (n_components, length)
+        method_name: 方法名称（如 "LCD", "VMD", "FastICA"）
+        file_basename: 文件基础名称（用于保存文件名）
+        save_dir: 保存目录（如果为 None，则不保存）
+    """
+    if save_dir is None:
+        return
+    
+    try:
+        os.makedirs(save_dir, exist_ok=True)
+        
+        n_components = components.shape[0] if components.ndim > 1 else 1
+        if components.ndim == 1:
+            components = components.reshape(1, -1)
+        
+        # 创建图形
+        fig, axes = plt.subplots(n_components + 1, 1, figsize=(12, 3 * (n_components + 1)))
+        if n_components + 1 == 1:
+            axes = [axes]
+        
+        # 绘制原始信号
+        axes[0].plot(signal, 'k-', linewidth=0.8)
+        axes[0].set_title(f'Original Signal', fontsize=10)
+        axes[0].set_ylabel('Amplitude')
+        axes[0].grid(True, alpha=0.3)
+        
+        # 绘制各个分量
+        for i in range(n_components):
+            axes[i + 1].plot(components[i], 'b-', linewidth=0.8)
+            axes[i + 1].set_title(f'{method_name} Component {i+1}', fontsize=10)
+            axes[i + 1].set_ylabel('Amplitude')
+            axes[i + 1].set_xlabel('Sample')
+            axes[i + 1].grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        # 保存图形
+        save_path = os.path.join(save_dir, f"{file_basename}_{method_name}.png")
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        
+        logger.info(f"中间产物图线已保存至: {save_path}")
+        
+    except Exception as e:
+        logger.warning(f"绘制中间产物图线失败: {str(e)}")
+        # 确保关闭图形以避免内存泄漏
+        try:
+            plt.close('all')
+        except:
+            pass
+
+
 def process_signal_pipeline(file_path, output_path, sampling_rate, processing_methods, 
-                           max_samples=None, num_components=10, progress_callback=None):
+                           max_samples=None, num_components=10, progress_callback=None,
+                           plot_intermediate=False, plot_save_dir=None):
     """
     灵活的信号处理管道，支持单一分解方法 + 可选 FastICA
     
@@ -486,6 +549,8 @@ def process_signal_pipeline(file_path, output_path, sampling_rate, processing_me
         max_samples: 最大采样点数
         num_components: 分解/分离的分量数量
         progress_callback: 进度回调函数 callback(current_step, total_steps, message)
+        plot_intermediate: 是否绘制中间产物图线（默认 False）
+        plot_save_dir: 图线保存目录（如果为 None 且 plot_intermediate=True，则不保存）
     
     Returns:
         processed_signal: 处理后的信号数组
@@ -542,6 +607,12 @@ def process_signal_pipeline(file_path, output_path, sampling_rate, processing_me
     current_signal = signal.copy()
     processing_steps = []
     
+    # Create plot save directory if needed
+    file_basename = os.path.splitext(os.path.basename(file_path))[0]
+    if plot_intermediate and plot_save_dir is None:
+        # Default to a subdirectory in the output path's parent
+        plot_save_dir = os.path.join(os.path.dirname(output_path), 'intermediate_plots')
+    
     # Apply processing methods sequentially
     for idx, method in enumerate(processing_methods):
         try:
@@ -554,6 +625,12 @@ def process_signal_pipeline(file_path, output_path, sampling_rate, processing_me
                 # Limit the number of components to prevent dimension explosion
                 n_components_to_use = min(len(isc_components), num_components)
                 isc_components = isc_components[:n_components_to_use]
+                
+                # Plot intermediate results if enabled
+                if plot_intermediate:
+                    components_array = np.array(isc_components)
+                    plot_intermediate_results(current_signal, components_array, 'LCD', 
+                                            file_basename, plot_save_dir)
                 
                 current_signal = np.column_stack(isc_components)
                 processing_steps.append(f"LCD({n_components_to_use})")
@@ -569,6 +646,11 @@ def process_signal_pipeline(file_path, output_path, sampling_rate, processing_me
                 selected_imfs = select_correlated_components(imfs, current_signal)
                 n_components_to_use = min(len(selected_imfs), num_components)
                 selected_imfs = selected_imfs[:n_components_to_use]
+                
+                # Plot intermediate results if enabled
+                if plot_intermediate:
+                    plot_intermediate_results(current_signal, selected_imfs, 'VMD', 
+                                            file_basename, plot_save_dir)
                 
                 # Fix: Ensure selected_imfs is a list of arrays before column_stack
                 current_signal = np.column_stack(list(selected_imfs))
@@ -586,6 +668,11 @@ def process_signal_pipeline(file_path, output_path, sampling_rate, processing_me
                 n_components_to_use = min(len(selected_imfs), num_components)
                 selected_imfs = selected_imfs[:n_components_to_use]
                 
+                # Plot intermediate results if enabled
+                if plot_intermediate:
+                    plot_intermediate_results(current_signal, selected_imfs, 'EEMD', 
+                                            file_basename, plot_save_dir)
+                
                 # Fix: Ensure selected_imfs is a list of arrays before column_stack
                 current_signal = np.column_stack(list(selected_imfs))
                 processing_steps.append(f"EEMD({n_components_to_use})")
@@ -601,6 +688,11 @@ def process_signal_pipeline(file_path, output_path, sampling_rate, processing_me
                 selected_imfs = select_correlated_components(imfs, current_signal)
                 n_components_to_use = min(len(selected_imfs), num_components)
                 selected_imfs = selected_imfs[:n_components_to_use]
+                
+                # Plot intermediate results if enabled
+                if plot_intermediate:
+                    plot_intermediate_results(current_signal, selected_imfs, 'LMD', 
+                                            file_basename, plot_save_dir)
                 
                 # Fix: Ensure selected_imfs is a list of arrays before column_stack
                 current_signal = np.column_stack(list(selected_imfs))
@@ -625,6 +717,13 @@ def process_signal_pipeline(file_path, output_path, sampling_rate, processing_me
                 ica_n_components = min(num_components, signal_imputed.shape[1])
                 ica = FastICA(n_components=ica_n_components, random_state=0, tol=1e-4, max_iter=500)
                 signal_ica = ica.fit_transform(signal_imputed)
+                
+                # Plot intermediate results if enabled (transpose to get shape: n_components x length)
+                if plot_intermediate:
+                    signal_ica_transposed = signal_ica.T
+                    plot_intermediate_results(current_signal[:, 0] if current_signal.ndim > 1 else current_signal, 
+                                            signal_ica_transposed, 'FastICA', 
+                                            file_basename, plot_save_dir)
                 
                 current_signal = signal_ica
                 processing_steps.append(f"FastICA({current_signal.shape[1]})")

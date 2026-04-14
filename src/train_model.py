@@ -4,12 +4,27 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import os
 from mcnn_model import MSASCnn
+from cnn_models import create_model, get_available_models
 
-def train_model(folder_path, train_mode, existing_model_path, new_model_path):
+def train_model(folder_path, train_mode, existing_model_path, new_model_path, model_arch='MCNN'):
     """
     训练模型的主函数。
     假设数据已经由 build_tensor.py 处理好并保存在 folder_path 中。
+    
+    Args:
+        folder_path: 数据集目录路径
+        train_mode: 训练模式 ('第一次训练模型' 或 '读取已有模型继续训练')
+        existing_model_path: 已有模型路径（仅在继续训练时需要）
+        new_model_path: 新模型保存路径
+        model_arch: 模型架构名称 ('MCNN', 'SimpleCNN', 'WDCNN', 'ResCNN')
     """
+    # 验证模型架构
+    available_models = ['MCNN'] + get_available_models()
+    if model_arch not in available_models:
+        raise ValueError(f"不支持的模型架构: {model_arch}. 支持的模型: {available_models}")
+    
+    print(f"使用模型架构: {model_arch}")
+    
     # 加载预处理后的张量数据
     train_data_path = os.path.join(folder_path, "train_tensor_data.pt")
     val_data_path = os.path.join(folder_path, "val_tensor_data.pt")
@@ -51,13 +66,21 @@ def train_model(folder_path, train_mode, existing_model_path, new_model_path):
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     
+    # 根据选择的架构创建模型
     if train_mode == '读取已有模型继续训练':
-        model = MSASCnn(num_channels, num_classes)
+        if model_arch == 'MCNN':
+            model = MSASCnn(num_channels, num_classes)
+        else:
+            model = create_model(model_arch, num_channels, num_classes)
+        
         model.load_state_dict(torch.load(existing_model_path))
         print(f"Loaded existing model from {existing_model_path}")
     else:
-        model = MSASCnn(num_channels, num_classes)
-        print(f"Initialized new model for {num_classes} classes.")
+        if model_arch == 'MCNN':
+            model = MSASCnn(num_channels, num_classes)
+        else:
+            model = create_model(model_arch, num_channels, num_classes)
+        print(f"Initialized new {model_arch} model for {num_classes} classes.")
     
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
@@ -108,3 +131,11 @@ def train_model(folder_path, train_mode, existing_model_path, new_model_path):
     mapping_path = new_model_path.replace('.pth', '_label_mapping.pt')
     torch.save(class_to_idx, mapping_path)
     print(f"Label mapping saved to {mapping_path}")
+    
+    # 保存模型架构信息
+    arch_info_path = new_model_path.replace('.pth', '_arch_info.txt')
+    with open(arch_info_path, 'w', encoding='utf-8') as f:
+        f.write(f"Model Architecture: {model_arch}\n")
+        f.write(f"Number of Classes: {num_classes}\n")
+        f.write(f"Number of Channels: {num_channels}\n")
+    print(f"Architecture info saved to {arch_info_path}")
