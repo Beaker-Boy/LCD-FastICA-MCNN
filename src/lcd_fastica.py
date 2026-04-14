@@ -11,6 +11,24 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
 import logging
 
+# Import PSO optimizer
+try:
+    from pso_optimizer import (
+        calculate_spectral_entropy,
+        detect_interference_frequencies,
+        adaptive_update_frequency,
+        calculate_fitness,
+        optimize_lcd_fastica_params,
+        PSO_Optimizer
+    )
+    PSO_AVAILABLE = True
+    logger_pso = logging.getLogger(__name__)
+    logger_pso.info("PSO优化器模块加载成功")
+except ImportError:
+    PSO_AVAILABLE = False
+    logger_pso = logging.getLogger(__name__)
+    logger_pso.warning("pso_optimizer模块未找到，PSO优化功能不可用")
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -41,48 +59,72 @@ except ImportError:
     logger.warning("PyLMD not installed. LMD method will not be available.")
 
 
-def linear_transform(x, t, m):
+def linear_transform(x, t, m, a=1.0):
     """
     线性变换函数，用于构建基线
+    
+    Args:
+        x: 信号值
+        t: 时间向量
+        m: 均值
+        a: 插值参数（控制基线构建的平滑度）
+    
+    Returns:
+        baseline: 基线信号
     """
     dt = t.max() - t.min()
     if dt == 0:
         return np.zeros_like(x)  # 防止除以零
-    return (x - m) * (t - t.min()) / dt + m
+    # 使用参数a调整插值权重
+    return (x - m) * ((t - t.min()) / dt) ** a + m
 
-def local_characteristic_scale_decomposition(x, t, num_components=10):
+
+def local_characteristic_scale_decomposition(x, t, num_components=10, interpolation_param=1.0):
     """
     局部特征尺度分解函数
+    
+    Args:
+        x: 输入信号
+        t: 时间向量
+        num_components: 需要分解的分量数量
+        interpolation_param: 插值参数a（控制基线构建的平滑度），默认1.0
+    
+    Returns:
+        isc_components: ISC分量列表
     """
     m = np.mean(x)  # 计算信号的平均值
-    x -= m  # 去中心化
+    x_centered = x - m  # 去中心化（不修改原始x）
     isc_components = []
     max_iterations = 1000  # 设置最大迭代次数以防止无限循环
     
-    for iteration in tqdm(range(max_iterations), desc="Local Characteristic Scale Decomposition"):
+    current_signal = x_centered.copy()
+    
+    for iteration in tqdm(range(max_iterations), desc=f"LCD Decomposition (a={interpolation_param:.2f})"):
         # 寻找极值点
-        extrema_indices = np.where((np.diff(np.sign(np.diff(x)))) != 0)[0] + 1
+        extrema_indices = np.where((np.diff(np.sign(np.diff(current_signal)))) != 0)[0] + 1
         
         if len(extrema_indices) < 4:  # 确保有足够的极值点
             break
         
-        # 构建基线
-        baseline = np.zeros_like(x)
+        # 构建基线（使用插值参数a）
+        baseline = np.zeros_like(current_signal)
         for i in range(len(extrema_indices) // 2):
             max_idx = extrema_indices[2 * i]
             min_idx = extrema_indices[2 * i + 1]
-            baseline[max_idx:min_idx] = linear_transform(x[max_idx:min_idx], t[max_idx:min_idx], m)
+            segment_x = current_signal[max_idx:min_idx]
+            segment_t = t[max_idx:min_idx]
+            baseline[max_idx:min_idx] = linear_transform(segment_x, segment_t, m, a=interpolation_param)
         
         # 提取ISC分量
-        isc = x - baseline
+        isc = current_signal - baseline
         isc_components.append(isc)
         
         # 检查是否已经达到所需的ISC分量数量或满足极值单调性判据
-        if len(isc_components) >= num_components: # or extreme_monotonicity_criterion(isc):
+        if len(isc_components) >= num_components:
             break
         
         # 更新信号
-        x = baseline - np.mean(isc)
+        current_signal = baseline - np.mean(isc)
     
     return isc_components
 
@@ -537,9 +579,10 @@ def plot_intermediate_results(signal, components, method_name, file_basename, sa
 
 def process_signal_pipeline(file_path, output_path, sampling_rate, processing_methods, 
                            max_samples=None, num_components=10, progress_callback=None,
-                           plot_intermediate=False, plot_save_dir=None):
+                           plot_intermediate=False, plot_save_dir=None,
+                           enable_pso=False, fault_frequencies=None, pso_config=None):
     """
-    灵活的信号处理管道，支持单一分解方法 + 可选 FastICA
+    灵活的信号处理管道，支持单一分解方法 + 可选 FastICA，支持PSO参数优化
     
     Args:
         file_path: 输入信号文件路径 (.npy)
@@ -551,10 +594,19 @@ def process_signal_pipeline(file_path, output_path, sampling_rate, processing_me
         progress_callback: 进度回调函数 callback(current_step, total_steps, message)
         plot_intermediate: 是否绘制中间产物图线（默认 False）
         plot_save_dir: 图线保存目录（如果为 None 且 plot_intermediate=True，则不保存）
+        enable_pso: 是否启用PSO参数优化（默认 False）
+        fault_frequencies: 故障特征频率列表 (List[float])，用于PSO适应度计算
+        pso_config: PSO配置字典，包含以下键：
+            - n_particles: 粒子数（默认 20）
+            - max_iterations: 最大迭代次数（默认 30）
+            - c1: 学习因子c1（默认 2.0）
+            - c2: 学习因子c2（默认 2.0）
+            - w_start: 初始惯性权重（默认 0.9）
+            - w_end: 最终惯性权重（默认 0.4）
     
     Returns:
         processed_signal: 处理后的信号数组
-        processing_info: 处理信息字典
+        processing_info: 处理信息字典（新增 'pso_optimization' 字段）
     
     Raises:
         ValueError: 当处理方法组合不合法时
@@ -590,6 +642,68 @@ def process_signal_pipeline(file_path, output_path, sampling_rate, processing_me
         if len(processing_methods) > 2:
             raise ValueError("最多只能使用两种方法：一种分解方法 + FastICA")
     
+    # Initialize PSO configuration
+    pso_info = {'enabled': enable_pso, 'optimized_params': None}
+    lcd_a_param = 1.0  # 默认插值参数
+    fastica_tol = 1e-4  # 默认收敛阈值
+    
+    # PSO Optimization Step (if enabled and using LCD)
+    if enable_pso and 'LCD' in processing_methods:
+        if not PSO_AVAILABLE:
+            logger.warning("PSO优化器不可用，跳过PSO优化步骤")
+        elif fault_frequencies is None or len(fault_frequencies) == 0:
+            logger.warning("未提供故障特征频率，跳过PSO优化步骤")
+        else:
+            try:
+                report_progress(0, "执行PSO参数优化")
+                
+                # Set default PSO config
+                if pso_config is None:
+                    pso_config = {}
+                
+                n_particles = pso_config.get('n_particles', 20)
+                max_iterations = pso_config.get('max_iterations', 30)
+                c1 = pso_config.get('c1', 2.0)
+                c2 = pso_config.get('c2', 2.0)
+                w_start = pso_config.get('w_start', 0.9)
+                w_end = pso_config.get('w_end', 0.4)
+                
+                logger.info(f"PSO配置: 粒子数={n_particles}, 迭代次数={max_iterations}, c1={c1}, c2={c2}")
+                
+                # Read signal for optimization
+                signal_for_pso = np.load(file_path)
+                if max_samples is not None:
+                    signal_for_pso = signal_for_pso[:max_samples]
+                
+                # Run optimization using the convenience function
+                best_a, best_tol, optimization_info = optimize_lcd_fastica_params(
+                    signal=signal_for_pso,
+                    fs=sampling_rate,
+                    fault_frequencies=fault_frequencies,
+                    pso_config=pso_config,
+                    progress_callback=lambda iter, max_iter, fitness: report_progress(
+                        0, f"PSO优化中... ({iter}/{max_iter}, F={fitness:.4f})"
+                    ) if progress_callback else None
+                )
+                
+                # Extract optimized parameters
+                lcd_a_param = best_a
+                fastica_tol = best_tol
+                
+                pso_info['optimized_params'] = {
+                    'a': best_a,
+                    'tol': best_tol,
+                    'full_info': optimization_info
+                }
+                pso_info['best_fitness'] = optimization_info['best_fitness']
+                
+                logger.info(f"PSO优化完成: a*={lcd_a_param:.4f}, tol*={fastica_tol:.2e}, F*={optimization_info['best_fitness']:.4f}")
+                report_progress(0, f"PSO优化完成 (F={optimization_info['best_fitness']:.4f})")
+                
+            except Exception as e:
+                logger.error(f"PSO优化失败：{str(e)}，使用默认参数继续")
+                pso_info['error'] = str(e)
+    
     # Read signal
     report_progress(0, "读取信号文件")
     try:
@@ -617,9 +731,10 @@ def process_signal_pipeline(file_path, output_path, sampling_rate, processing_me
     for idx, method in enumerate(processing_methods):
         try:
             if method == 'LCD':
-                report_progress(idx + 1, f"执行 LCD 分解 (目标分量数：{num_components})")
+                report_progress(idx + 1, f"执行 LCD 分解 (目标分量数：{num_components}, a={lcd_a_param:.4f})")
                 isc_components = local_characteristic_scale_decomposition(
-                    current_signal, t, num_components=num_components
+                    current_signal, t, num_components=num_components, 
+                    interpolation_param=lcd_a_param
                 )
                 
                 # Limit the number of components to prevent dimension explosion
@@ -633,8 +748,8 @@ def process_signal_pipeline(file_path, output_path, sampling_rate, processing_me
                                             file_basename, plot_save_dir)
                 
                 current_signal = np.column_stack(isc_components)
-                processing_steps.append(f"LCD({n_components_to_use})")
-                logger.info(f"LCD 完成，生成 {n_components_to_use} 个分量")
+                processing_steps.append(f"LCD({n_components_to_use},a={lcd_a_param:.2f})")
+                logger.info(f"LCD 完成，生成 {n_components_to_use} 个分量 (a={lcd_a_param:.4f})")
                 
             elif method == 'VMD':
                 if not VMD_AVAILABLE:
@@ -706,7 +821,7 @@ def process_signal_pipeline(file_path, output_path, sampling_rate, processing_me
                     processing_steps.append("FastICA_Skipped")
                     continue
                 
-                report_progress(idx + 1, f"执行 FastICA 分离 (分量数：{min(num_components, current_signal.shape[1])})")
+                report_progress(idx + 1, f"执行 FastICA 分离 (分量数：{min(num_components, current_signal.shape[1])}, tol={fastica_tol:.2e})")
                 
                 # Handle NaN values
                 imputer = SimpleImputer(strategy='mean')
@@ -715,7 +830,7 @@ def process_signal_pipeline(file_path, output_path, sampling_rate, processing_me
                 # FastICA handles centering and whitening internally
                 # Only standardize if needed for numerical stability
                 ica_n_components = min(num_components, signal_imputed.shape[1])
-                ica = FastICA(n_components=ica_n_components, random_state=0, tol=1e-4, max_iter=500)
+                ica = FastICA(n_components=ica_n_components, random_state=0, tol=fastica_tol, max_iter=500)
                 signal_ica = ica.fit_transform(signal_imputed)
                 
                 # Plot intermediate results if enabled (transpose to get shape: n_components x length)
@@ -726,8 +841,8 @@ def process_signal_pipeline(file_path, output_path, sampling_rate, processing_me
                                             file_basename, plot_save_dir)
                 
                 current_signal = signal_ica
-                processing_steps.append(f"FastICA({current_signal.shape[1]})")
-                logger.info(f"FastICA 完成，输出 {current_signal.shape[1]} 个成分")
+                processing_steps.append(f"FastICA({current_signal.shape[1]},tol={fastica_tol:.0e})")
+                logger.info(f"FastICA 完成，输出 {current_signal.shape[1]} 个成分 (tol={fastica_tol:.2e})")
         
         except Exception as e:
             logger.error(f"处理步骤 {method} 失败：{str(e)}")
@@ -737,12 +852,28 @@ def process_signal_pipeline(file_path, output_path, sampling_rate, processing_me
     if current_signal.ndim == 1:
         current_signal = current_signal.reshape(-1, 1)
     
+    # Clean up pso_info for MATLAB serialization
+    pso_info_serializable = {
+        'enabled': bool(pso_info.get('enabled', False)),
+        'optimized_params_a': 0.0,
+        'optimized_params_tol': 0.0,
+        'best_fitness': float(pso_info.get('best_fitness', 0.0)) if pso_info.get('best_fitness') is not None else 0.0,
+        'error': str(pso_info.get('error', '')) if pso_info.get('error') else ''
+    }
+    
+    # Extract serializable optimized parameters
+    opt_params = pso_info.get('optimized_params')
+    if opt_params and isinstance(opt_params, dict):
+        pso_info_serializable['optimized_params_a'] = float(opt_params.get('a', 1.0))
+        pso_info_serializable['optimized_params_tol'] = float(opt_params.get('tol', 1e-4))
+    
     processing_info = {
         'input_shape': signal.shape,
         'output_shape': current_signal.shape,
         'processing_steps': processing_steps,
         'sampling_rate': sampling_rate,
-        'time_vector': t
+        'time_vector': t,
+        'pso_optimization': pso_info_serializable
     }
     
     # Save results
@@ -761,3 +892,64 @@ def process_signal_pipeline(file_path, output_path, sampling_rate, processing_me
     report_progress(len(processing_methods), "处理完成")
     
     return current_signal, processing_info
+
+
+def process_signal_pipeline_with_pso(file_path, output_path, sampling_rate, processing_methods,
+                                    fault_frequencies, max_samples=None, num_components=10,
+                                    progress_callback=None, plot_intermediate=False, 
+                                    plot_save_dir=None, pso_config=None):
+    """
+    带PSO参数优化的信号处理管道（便捷封装函数）
+    
+    Args:
+        file_path: 输入信号文件路径 (.npy)
+        output_path: 输出文件路径 (.mat)
+        sampling_rate: 采样率 (Hz)
+        processing_methods: 处理方法列表（必须包含 'LCD'）
+        fault_frequencies: 故障特征频率列表 (List[float])，用于PSO适应度计算
+        max_samples: 最大采样点数
+        num_components: 分解/分离的分量数量
+        progress_callback: 进度回调函数 callback(current_step, total_steps, message)
+        plot_intermediate: 是否绘制中间产物图线（默认 False）
+        plot_save_dir: 图线保存目录
+        pso_config: PSO配置字典
+    
+    Returns:
+        processed_signal: 处理后的信号数组
+        processing_info: 处理信息字典（包含PSO优化结果）
+    
+    Example:
+        >>> signal, info = process_signal_pipeline_with_pso(
+        ...     file_path='data/signal.npy',
+        ...     output_path='results/output.mat',
+        ...     sampling_rate=20000,
+        ...     processing_methods=['LCD', 'FastICA'],
+        ...     fault_frequencies=[50.0, 100.0, 150.0],
+        ...     num_components=10
+        ... )
+        >>> print(info['pso_optimization']['optimized_params'])
+    """
+    if not PSO_AVAILABLE:
+        raise ImportError("PSO优化器不可用。请确保 pso_optimizer.py 存在且依赖已安装")
+    
+    if fault_frequencies is None or len(fault_frequencies) == 0:
+        raise ValueError("使用PSO优化时必须提供故障特征频率列表")
+    
+    if 'LCD' not in processing_methods:
+        logger.warning("PSO优化仅支持LCD分解方法，当前方法列表不包含LCD")
+    
+    # Call the main pipeline with PSO enabled
+    return process_signal_pipeline(
+        file_path=file_path,
+        output_path=output_path,
+        sampling_rate=sampling_rate,
+        processing_methods=processing_methods,
+        max_samples=max_samples,
+        num_components=num_components,
+        progress_callback=progress_callback,
+        plot_intermediate=plot_intermediate,
+        plot_save_dir=plot_save_dir,
+        enable_pso=True,
+        fault_frequencies=fault_frequencies,
+        pso_config=pso_config
+    )

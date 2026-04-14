@@ -98,6 +98,73 @@ class MainWindow(QMainWindow):
         self.checkbox_plot_intermediate.setChecked(False)
         processing_layout.addWidget(self.checkbox_plot_intermediate)
         
+        # PSO Optimization Section
+        pso_group = QGroupBox("PSO参数优化（可选）")
+        pso_layout = QVBoxLayout()
+        
+        # Enable PSO checkbox
+        self.checkbox_enable_pso = QCheckBox("启用PSO优化")
+        self.checkbox_enable_pso.setToolTip("使用粒子群优化算法自动搜索最优的LCD和FastICA参数")
+        self.checkbox_enable_pso.setChecked(False)
+        self.checkbox_enable_pso.stateChanged.connect(self.toggle_pso_settings)
+        pso_layout.addWidget(self.checkbox_enable_pso)
+        
+        # Fault frequencies input
+        fault_freq_layout = QHBoxLayout()
+        fault_freq_label = QLabel("故障特征频率(Hz):")
+        self.line_edit_fault_freqs = QLineEdit("")
+        self.line_edit_fault_freqs.setPlaceholderText("例如: 50, 100, 150")
+        self.line_edit_fault_freqs.setEnabled(False)
+        fault_freq_layout.addWidget(fault_freq_label)
+        fault_freq_layout.addWidget(self.line_edit_fault_freqs, 1)
+        pso_layout.addLayout(fault_freq_layout)
+        
+        # Advanced PSO settings (collapsible)
+        self.pso_advanced_widget = QWidget()
+        pso_advanced_layout = QVBoxLayout()
+        
+        # Particle count
+        particles_layout = QHBoxLayout()
+        particles_label = QLabel("粒子数:")
+        self.spin_n_particles = QLineEdit("20")
+        self.spin_n_particles.setFixedWidth(60)
+        particles_layout.addWidget(particles_label)
+        particles_layout.addWidget(self.spin_n_particles)
+        particles_layout.addStretch()
+        pso_advanced_layout.addLayout(particles_layout)
+        
+        # Max iterations
+        iterations_layout = QHBoxLayout()
+        iterations_label = QLabel("最大迭代次数:")
+        self.spin_max_iterations = QLineEdit("30")
+        self.spin_max_iterations.setFixedWidth(60)
+        iterations_layout.addWidget(iterations_label)
+        iterations_layout.addWidget(self.spin_max_iterations)
+        iterations_layout.addStretch()
+        pso_advanced_layout.addLayout(iterations_layout)
+        
+        # Learning factors
+        learning_layout = QHBoxLayout()
+        c1_label = QLabel("c1:")
+        self.spin_c1 = QLineEdit("2.0")
+        self.spin_c1.setFixedWidth(60)
+        c2_label = QLabel("c2:")
+        self.spin_c2 = QLineEdit("2.0")
+        self.spin_c2.setFixedWidth(60)
+        learning_layout.addWidget(c1_label)
+        learning_layout.addWidget(self.spin_c1)
+        learning_layout.addWidget(c2_label)
+        learning_layout.addWidget(self.spin_c2)
+        learning_layout.addStretch()
+        pso_advanced_layout.addLayout(learning_layout)
+        
+        self.pso_advanced_widget.setLayout(pso_advanced_layout)
+        self.pso_advanced_widget.setVisible(False)
+        pso_layout.addWidget(self.pso_advanced_widget)
+        
+        pso_group.setLayout(pso_layout)
+        processing_layout.addWidget(pso_group)
+        
         processing_group.setLayout(processing_layout)
         
         self.button_add_to_batch = QPushButton("添加至批处理列表")
@@ -244,7 +311,17 @@ class MainWindow(QMainWindow):
         self.label_existing_model.setVisible(is_continue_training)
         self.line_edit_existing_model.setVisible(is_continue_training)
         self.button_existing_model.setVisible(is_continue_training)
-        
+    
+    def toggle_pso_settings(self, state):
+        """根据PSO启用状态切换相关控件的可用性"""
+        enabled = (state == Qt.Checked)
+        self.line_edit_fault_freqs.setEnabled(enabled)
+        self.pso_advanced_widget.setVisible(enabled)
+        # Force layout update
+        self.pso_advanced_widget.updateGeometry()
+        if self.pso_advanced_widget.parentWidget():
+            self.pso_advanced_widget.parentWidget().updateGeometry()
+
     def add_to_batch(self):
         file_path = self.line_edit_file.text()
         label = self.combo_label.currentText()
@@ -368,6 +445,38 @@ class MainWindow(QMainWindow):
                     plot_intermediate = self.checkbox_plot_intermediate.isChecked()
                     plot_save_dir = INTERMEDIATE_PLOTS_DIR if plot_intermediate else None
                     
+                    # Determine PSO settings
+                    enable_pso = self.checkbox_enable_pso.isChecked()
+                    fault_frequencies = []
+                    pso_config = {}
+                    
+                    if enable_pso:
+                        # Parse fault frequencies
+                        fault_freqs_text = self.line_edit_fault_freqs.text().strip()
+                        if fault_freqs_text:
+                            try:
+                                fault_frequencies = [float(f.strip()) for f in fault_freqs_text.split(',') if f.strip()]
+                            except ValueError:
+                                QMessageBox.warning(self, "警告", 
+                                    "故障特征频率格式错误，请使用逗号分隔的数字（例如: 50, 100, 150）")
+                                return
+                        
+                        if not fault_frequencies:
+                            QMessageBox.warning(self, "警告", "启用PSO优化时必须提供故障特征频率")
+                            return
+                        
+                        # Build PSO config
+                        try:
+                            pso_config = {
+                                'n_particles': int(self.spin_n_particles.text()),
+                                'max_iterations': int(self.spin_max_iterations.text()),
+                                'c1': float(self.spin_c1.text()),
+                                'c2': float(self.spin_c2.text())
+                            }
+                        except ValueError:
+                            QMessageBox.warning(self, "警告", "PSO参数格式错误，请检查粒子数、迭代次数和学习因子")
+                            return
+                    
                     # Use the new flexible pipeline with progress callback
                     process_signal_pipeline(
                         file_path=npy_path,
@@ -377,7 +486,10 @@ class MainWindow(QMainWindow):
                         max_samples=max_samples,
                         progress_callback=self.progress_callback,
                         plot_intermediate=plot_intermediate,
-                        plot_save_dir=plot_save_dir
+                        plot_save_dir=plot_save_dir,
+                        enable_pso=enable_pso,
+                        fault_frequencies=fault_frequencies if enable_pso else None,
+                        pso_config=pso_config if enable_pso else None
                     )
                 except ImportError as e:
                     logger.error(f"依赖库缺失：{str(e)}")
