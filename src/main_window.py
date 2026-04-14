@@ -62,7 +62,16 @@ class MainWindow(QMainWindow):
         self.line_edit_sampling_rate = QLineEdit("20000") # Default value
 
         self.label_max_samples = QLabel("最大采样点数:")
-        self.line_edit_max_samples = QLineEdit("9142857") # Default value
+        self.line_edit_max_samples = QLineEdit("500000") # Default value - safe for all methods
+        self.line_edit_max_samples.setToolTip(
+            "⚠️ 重要：此参数控制信号长度，直接影响内存需求和计算时间\n"
+            "推荐设置：\n"
+            "  - VMD: ≤ 500,000（强烈推荐）\n"
+            "  - EEMD: ≤ 500,000（强烈推荐）\n"
+            "  - LMD: ≤ 500,000（强烈推荐）\n"
+            "  - LCD: 可以更大，≤ 2,000,000\n\n"
+            "如果设置过大导致内存不足，程序会自动拒绝并提示。"
+        )
         
         self.label_label = QLabel("选择标签:")
         self.combo_label = QComboBox()
@@ -87,11 +96,22 @@ class MainWindow(QMainWindow):
         ica_label = QLabel("后处理:")
         self.combo_ica = QComboBox()
         self.combo_ica.addItems(['无', 'FastICA'])
-        self.combo_ica.setToolTip("可选择是否使用 FastICA 进行独立成分分析")
+        self.combo_ica.setToolTip("⚠️ 注意：如需使用 FastICA，请在此处手动选择 'FastICA' 选项\n默认选项为 '无'，此时仅执行分解方法")
         ica_layout.addWidget(ica_label)
         ica_layout.addWidget(self.combo_ica, 1)
         processing_layout.addLayout(ica_layout)
         
+        # Num components setting
+        components_layout = QHBoxLayout()
+        components_label = QLabel("分解分量数:")
+        self.spin_num_components = QLineEdit("10")
+        self.spin_num_components.setFixedWidth(60)
+        self.spin_num_components.setToolTip("⚠️ 重要：VMD/EEMD/LMD推荐值 3-10，过大会导致内存不足！\n建议：\n  - VMD: 3-10\n  - EEMD: 3-8\n  - LMD: 4-8\n  - LCD: 5-15")
+        components_layout.addWidget(components_label)
+        components_layout.addWidget(self.spin_num_components)
+        components_layout.addStretch()
+        processing_layout.addLayout(components_layout)
+
         # Checkbox for plotting intermediate results
         self.checkbox_plot_intermediate = QCheckBox("绘制中间产物图线")
         self.checkbox_plot_intermediate.setToolTip("勾选后将保存分解/分离过程中的分量图线到 processed_data/ica_results/intermediate_plots 目录")
@@ -334,12 +354,19 @@ class MainWindow(QMainWindow):
         decomp_method = self.combo_decomposition.currentText()
         ica_method = self.combo_ica.currentText()
         
+        # Debug logging to trace the issue
+        logger.info(f"DEBUG: decomp_method='{decomp_method}', ica_method='{ica_method}'")
+        
         # Build processing methods list
         selected_methods = [decomp_method]
         if ica_method == 'FastICA':
             selected_methods.append('FastICA')
+            logger.info(f"DEBUG: FastICA added to selected_methods")
+        else:
+            logger.info(f"DEBUG: FastICA NOT added (ica_method != 'FastICA')")
         
         pipeline_desc = ' + '.join(selected_methods)
+        logger.info(f"DEBUG: Final selected_methods={selected_methods}")
 
         row_count = self.table_batch.rowCount()
         self.table_batch.insertRow(row_count)
@@ -416,10 +443,14 @@ class MainWindow(QMainWindow):
                 # Fix: Add type assertion for Qt.UserRole and data retrieval
                 selected_methods = status_item.data(Qt.UserRole) if status_item else []  # type: ignore[arg-type]
                 
+                # Debug logging to trace the issue
+                logger.info(f"DEBUG process_batch: Retrieved selected_methods={selected_methods} for {os.path.basename(npy_path)}")
+                
                 # Ensure selected_methods is a valid list
                 if not selected_methods or not isinstance(selected_methods, list):
+                    logger.warning(f"DEBUG: selected_methods is invalid, resetting to empty list")
                     selected_methods = []
-                
+
                 pipeline_text = ' + '.join(selected_methods) if selected_methods else "未指定方法"
                 # Fix: Add None check before calling setText
                 if status_item is not None:
@@ -478,12 +509,30 @@ class MainWindow(QMainWindow):
                             return
                     
                     # Use the new flexible pipeline with progress callback
+                    
+                    # Get num_components parameter
+                    try:
+                        num_components = int(self.spin_num_components.text())
+                        if num_components < 1 or num_components > 50:
+                            QMessageBox.warning(self, "警告", 
+                                "分解分量数必须在 1-50 之间！\n"
+                                "推荐值：\n"
+                                "  - VMD: 3-10\n"
+                                "  - EEMD: 3-8\n"
+                                "  - LMD: 4-8\n"
+                                "  - LCD: 5-15")
+                            return
+                    except ValueError:
+                        QMessageBox.warning(self, "警告", "分解分量数必须是有效的整数")
+                        return
+                    
                     process_signal_pipeline(
                         file_path=npy_path,
                         output_path=mat_output_path,
                         sampling_rate=sampling_rate,
                         processing_methods=selected_methods,
                         max_samples=max_samples,
+                        num_components=num_components,
                         progress_callback=self.progress_callback,
                         plot_intermediate=plot_intermediate,
                         plot_save_dir=plot_save_dir,

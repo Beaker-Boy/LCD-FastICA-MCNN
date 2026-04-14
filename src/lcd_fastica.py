@@ -207,16 +207,60 @@ def vmd_decomposition(signal, fs, K=5, alpha=2000, tau=0.001):
     
     Returns:
         imfs: 分解得到的本征模态函数数组
+    
+    Raises:
+        MemoryError: 当信号过长可能导致内存不足时
+        ValueError: 当参数不合理时
     """
     if not VMD_AVAILABLE:
         raise ImportError("vmdpy 库未安装，无法执行 VMD 分解")
+    
+    # Validate parameters before processing
+    signal_length = len(signal)
+    max_recommended_length = 500000  # 50万采样点
+    
+    if signal_length > max_recommended_length:
+        # Calculate estimated memory requirement
+        estimated_memory_gb = K * signal_length * 16 / (1024**3)
+        
+        raise MemoryError(
+            f"⚠️  VMD分解内存风险检测！\n"
+            f"   当前信号长度: {signal_length:,} 采样点\n"
+            f"   推荐最大值: {max_recommended_length:,} 采样点\n"
+            f"   预估内存需求: ~{estimated_memory_gb:.1f} GB (K={K})\n\n"
+            f"解决方案：\n"
+            f"  1. 在GUI中减少 '最大采样点数' 至 ≤ {max_recommended_length:,}\n"
+            f"  2. 减少 '分解分量数' 至 3-10 之间\n"
+            f"  3. 使用其他分解方法（如 LCD）处理长信号\n\n"
+            f"提示：VMD算法在频域操作，对长信号内存需求极高。\n"
+            f"      对于 {signal_length:,} 点的信号，即使 K=5 也需要约 {5 * signal_length * 16 / (1024**3):.1f} GB 内存。"
+        )
+    
+    # Validate K parameter
+    if K > 20:
+        logger.warning(f"⚠️  警告：K={K} 过大，VMD通常使用 K=3-10。过大的K值会导致计算缓慢且可能不稳定。")
+        K = min(K, 20)
+        logger.info(f"已将 K 调整为 {K}")
     
     DC = 0
     init = 1
     tol = 1e-7
     
-    # 执行 VMD 分解
-    imfs, u, u_hat = VMD(signal, alpha, tau, K, DC, init, tol)
+    logger.info(f"VMD分解配置: 信号长度={signal_length:,}, K={K}, alpha={alpha}")
+    
+    try:
+        # 执行 VMD 分解
+        imfs, u, u_hat = VMD(signal, alpha, tau, K, DC, init, tol)
+    except MemoryError:
+        raise MemoryError(
+            f"VMD分解内存不足！信号长度={signal_length:,}, K={K}\n"
+            f"建议：\n"
+            f"  1. 减少 max_samples 参数（推荐 ≤ 500,000）\n"
+            f"  2. 减少 num_components/K 参数（推荐 3-10）\n"
+            f"  3. 使用其他分解方法（如 LCD）"
+        )
+    except Exception as e:
+        raise RuntimeError(f"VMD分解失败：{str(e)}")
     
     print(f"VMD 分解完成，生成 {imfs.shape[0]} 个 IMF 分量")
     
@@ -232,7 +276,7 @@ def vmd_decomposition(signal, fs, K=5, alpha=2000, tau=0.001):
     
     return imfs
 
-def eemd_decomposition(signal, fs, max_imf=3):
+def eemd_decomposition(signal, fs, max_imf=3, trials=10, noise_width=0.05, parallel=False):
     """
     集成经验模态分解 (EEMD)
     
@@ -240,15 +284,70 @@ def eemd_decomposition(signal, fs, max_imf=3):
         signal: 输入信号
         fs: 采样频率
         max_imf: 最大 IMF 数量
+        trials: EEMD集成试验次数（默认10，原默认100太慢）
+        noise_width: 添加噪声的标准差（默认0.05）
+        parallel: 是否启用并行计算（默认False）
     
     Returns:
         imfs: 分解得到的本征模态函数数组
+    
+    Raises:
+        MemoryError: 当信号过长可能导致内存不足时
+        ValueError: 当参数不合理时
     """
     if not EEMD_AVAILABLE:
         raise ImportError("PyEMD 库未安装，无法执行 EEMD 分解")
     
-    eemd = EEMD(max_imf=max_imf)
-    imfs = eemd(signal)
+    # Validate signal length before processing
+    signal_length = len(signal)
+    max_recommended_length = 500000  # 50万采样点
+    
+    if signal_length > max_recommended_length:
+        estimated_memory_gb = trials * max_imf * signal_length * 8 / (1024**3)
+        
+        raise MemoryError(
+            f"⚠️  EEMD分解内存风险检测！\n"
+            f"   当前信号长度: {signal_length:,} 采样点\n"
+            f"   推荐最大值: {max_recommended_length:,} 采样点\n"
+            f"   预估内存需求: ~{estimated_memory_gb:.1f} GB (trials={trials}, max_imf={max_imf})\n\n"
+            f"解决方案：\n"
+            f"  1. 在GUI中减少 '最大采样点数' 至 ≤ {max_recommended_length:,}\n"
+            f"  2. 减少 '分解分量数' 至 3-8 之间\n"
+            f"  3. 减少 trials 参数至 10-20\n"
+            f"  4. 使用其他分解方法（如 LCD）处理长信号\n\n"
+            f"提示：EEMD需要进行 {trials} 次集成试验，每次生成最多 {max_imf} 个IMF，\n"
+            f"      总内存需求约为 trials × max_imf × signal_length × 8 bytes。"
+        )
+    
+    # Validate parameters
+    if trials > 50:
+        logger.warning(f"⚠️  警告：trials={trials} 过大，会导致计算非常缓慢。推荐值：10-20")
+        trials = min(trials, 50)
+        logger.info(f"已将 trials 调整为 {trials}")
+    
+    if max_imf > 15:
+        logger.warning(f"⚠️  警告：max_imf={max_imf} 过大，通常使用 3-8。过大的值会导致计算缓慢。")
+        max_imf = min(max_imf, 15)
+        logger.info(f"已将 max_imf 调整为 {max_imf}")
+    
+    # Performance optimization: reduce trials from default 100 to 10-20
+    # This significantly speeds up computation while maintaining good decomposition quality
+    logger.info(f"EEMD配置: 信号长度={signal_length:,}, trials={trials}, noise_width={noise_width}, max_imf={max_imf}, parallel={parallel}")
+    
+    try:
+        eemd = EEMD(trials=trials, noise_width=noise_width, parallel=parallel, max_imf=max_imf)
+        imfs = eemd(signal)
+    except MemoryError:
+        raise MemoryError(
+            f"EEMD分解内存不足！信号长度={signal_length:,}, trials={trials}, max_imf={max_imf}\n"
+            f"建议：\n"
+            f"  1. 减少 max_samples 参数（推荐 ≤ 500,000）\n"
+            f"  2. 减少 trials 参数（推荐 10-20）\n"
+            f"  3. 减少 max_imf 参数（推荐 3-8）\n"
+            f"  4. 使用其他分解方法（如 LCD）"
+        )
+    except Exception as e:
+        raise RuntimeError(f"EEMD分解失败：{str(e)}")
     
     print(f"EEMD 分解完成，生成 {imfs.shape[0]} 个 IMF 分量")
     
@@ -264,24 +363,71 @@ def eemd_decomposition(signal, fs, max_imf=3):
     
     return imfs
 
-def lmd_decomposition(signal, fs):
+def lmd_decomposition(signal, fs, max_num_pf=6, max_smooth_iteration=8, max_envelope_iteration=100):
     """
     局部均值分解 (LMD)
     
     Args:
         signal: 输入信号
         fs: 采样频率
+        max_num_pf: 最大PF分量数量（默认6，原默认8）
+        max_smooth_iteration: 最大平滑迭代次数（默认8，原默认12）
+        max_envelope_iteration: 最大包络迭代次数（默认100，原默认200）
     
     Returns:
         imfs: 分解得到的本征模态函数数组
+    
+    Raises:
+        MemoryError: 当信号过长可能导致内存不足时
+        ValueError: 当参数不合理时
     """
     if not LMD_AVAILABLE:
         raise ImportError("PyLMD 库未安装，无法执行 LMD 分解")
     
-    lmd = LMD()
-    result = lmd.lmd(signal)
-    # LMD 返回的结果是元组，第一个元素是 IMF 数组
-    imfs = result[0]
+    # Validate signal length before processing
+    signal_length = len(signal)
+    max_recommended_length = 500000  # 50万采样点
+    
+    if signal_length > max_recommended_length:
+        raise MemoryError(
+            f"⚠️  LMD分解内存风险检测！\n"
+            f"   当前信号长度: {signal_length:,} 采样点\n"
+            f"   推荐最大值: {max_recommended_length:,} 采样点\n\n"
+            f"解决方案：\n"
+            f"  1. 在GUI中减少 '最大采样点数' 至 ≤ {max_recommended_length:,}\n"
+            f"  2. 减少 '分解分量数' 至 4-8 之间\n"
+            f"  3. 使用其他分解方法（如 LCD）处理长信号\n\n"
+            f"提示：LMD算法需要多次迭代平滑和包络计算，长信号会导致计算缓慢且内存占用高。"
+        )
+    
+    # Validate parameters
+    if max_num_pf > 10:
+        logger.warning(f"⚠️  警告：max_num_pf={max_num_pf} 过大，通常使用 4-8。过大的值会导致计算缓慢。")
+        max_num_pf = min(max_num_pf, 10)
+        logger.info(f"已将 max_num_pf 调整为 {max_num_pf}")
+    
+    # Performance optimization: reduce iteration limits to speed up computation
+    logger.info(f"LMD配置: 信号长度={signal_length:,}, max_num_pf={max_num_pf}, max_smooth_iter={max_smooth_iteration}, max_env_iter={max_envelope_iteration}")
+    
+    try:
+        lmd = LMD(
+            max_num_pf=max_num_pf,
+            max_smooth_iteration=max_smooth_iteration,
+            max_envelope_iteration=max_envelope_iteration
+        )
+        result = lmd.lmd(signal)
+        # LMD 返回的结果是元组，第一个元素是 IMF 数组
+        imfs = result[0]
+    except MemoryError:
+        raise MemoryError(
+            f"LMD分解内存不足！信号长度={signal_length:,}, max_num_pf={max_num_pf}\n"
+            f"建议：\n"
+            f"  1. 减少 max_samples 参数（推荐 ≤ 500,000）\n"
+            f"  2. 减少 max_num_pf 参数（推荐 4-8）\n"
+            f"  3. 使用其他分解方法（如 LCD）"
+        )
+    except Exception as e:
+        raise RuntimeError(f"LMD分解失败：{str(e)}")
     
     print(f"LMD 分解完成，生成 {imfs.shape[0]} 个 PF 分量")
     
@@ -296,660 +442,3 @@ def lmd_decomposition(signal, fs):
         print(f"PF {i+1} 相关系数：{corr:.4f}")
     
     return imfs
-
-def select_correlated_components(imfs, signal, threshold=0.5):
-    """
-    根据相关系数选择有效的分解分量
-    
-    Args:
-        imfs: 分解得到的本征模态函数数组
-        signal: 原始信号
-        threshold: 相关系数阈值
-    
-    Returns:
-        selected_imfs: 选中的分量数组
-    """
-    # 计算每个 IMF 与原始信号的相关系数
-    correlation_coeffs = [np.corrcoef(signal, imfs[i])[0, 1] for i in range(len(imfs))]
-    correlation_coeffs = np.array(correlation_coeffs)
-    
-    # 选择相关系数大于阈值的 IMF
-    selected_indices = [i for i, coeff in enumerate(correlation_coeffs) if coeff > threshold]
-    selected_imfs = imfs[selected_indices]
-    
-    # 如果没有相关系数大于阈值的 IMF，则选择相关系数最大的那个 IMF
-    if selected_imfs.shape[0] == 0:
-        max_corr_index = np.argmax(correlation_coeffs)
-        selected_imfs = imfs[max_corr_index:max_corr_index + 1]
-        print(f"没有相关系数大于 {threshold} 的分量，选择相关系数最大的分量 (索引：{max_corr_index})")
-    
-    return selected_imfs
-
-
-if __name__ == "__main__":
-    """
-    测试脚本：验证 VMD、EEMD、LMD 方法是否可用
-    """
-    print("=" * 60)
-    print("信号处理方法可用性检查")
-    print("=" * 60)
-    
-    print(f"\nVMD 方法：{'✓ 可用' if VMD_AVAILABLE else '✗ 不可用 (需要安装 vmdpy)'}")
-    print(f"EEMD 方法：{'✓ 可用' if EEMD_AVAILABLE else '✗ 不可用 (需要安装 PyEMD)'}")
-    print(f"LMD 方法：{'✓ 可用' if LMD_AVAILABLE else '✗ 不可用 (需要安装 PyLMD)'}")
-    
-    print("\n" + "=" * 60)
-    print("可用的处理方法列表:")
-    print("  - None (无处理)")
-    print("  - LCD (局部特征尺度分解)")
-    print("  - FastICA (快速独立成分分析)")
-    if VMD_AVAILABLE:
-        print("  - VMD (变分模态分解)")
-    if EEMD_AVAILABLE:
-        print("  - EEMD (集成经验模态分解)")
-    if LMD_AVAILABLE:
-        print("  - LMD (局部均值分解)")
-    print("=" * 60)
-    
-    # 生成一个简单的测试信号
-    print("\n生成测试信号...")
-    fs = 20000  # 采样率 20kHz
-    t = np.linspace(0, 1, fs)  # 1 秒的信号
-    
-    # 创建一个包含多个频率成分的复合信号
-    f1, f2, f3 = 50, 200, 500  # 信号频率
-    test_signal = (0.5 * np.sin(2 * np.pi * f1 * t) + 
-                   0.3 * np.sin(2 * np.pi * f2 * t) + 
-                   0.2 * np.sin(2 * np.pi * f3 * t))
-    
-    # 添加一些噪声
-    noise = 0.1 * np.random.randn(len(t))
-    test_signal += noise
-    
-    print(f"测试信号长度：{len(test_signal)} 采样点")
-    print(f"测试信噪比：{np.std(test_signal - noise) / np.std(noise):.2f}")
-    
-    # 测试 VMD 方法
-    if VMD_AVAILABLE:
-        print("\n" + "-" * 60)
-        print("测试 VMD 分解...")
-        try:
-            imfs_vmd = vmd_decomposition(test_signal, fs, K=5)
-            print(f"✓ VMD 分解成功，得到 {imfs_vmd.shape[0]} 个 IMF 分量")
-            selected_vmd = select_correlated_components(imfs_vmd, test_signal)
-            print(f"✓ 选择 {selected_vmd.shape[0]} 个相关分量")
-        except Exception as e:
-            print(f"✗ VMD 测试失败：{e}")
-    
-    # 测试 EEMD 方法
-    if EEMD_AVAILABLE:
-        print("\n" + "-" * 60)
-        print("测试 EEMD 分解...")
-        try:
-            imfs_eemd = eemd_decomposition(test_signal, fs, max_imf=5)
-            print(f"✓ EEMD 分解成功，得到 {imfs_eemd.shape[0]} 个 IMF 分量")
-            selected_eemd = select_correlated_components(imfs_eemd, test_signal)
-            print(f"✓ 选择 {selected_eemd.shape[0]} 个相关分量")
-        except Exception as e:
-            print(f"✗ EEMD 测试失败：{e}")
-    
-    # 测试 LMD 方法
-    if LMD_AVAILABLE:
-        print("\n" + "-" * 60)
-        print("测试 LMD 分解...")
-        try:
-            imfs_lmd = lmd_decomposition(test_signal, fs)
-            print(f"✓ LMD 分解成功，得到 {imfs_lmd.shape[0]} 个 PF 分量")
-            selected_lmd = select_correlated_components(imfs_lmd, test_signal)
-            print(f"✓ 选择 {selected_lmd.shape[0]} 个相关分量")
-        except Exception as e:
-            print(f"✗ LMD 测试失败：{e}")
-    
-    print("\n" + "=" * 60)
-    print("测试完成!")
-    print("=" * 60)
-
-def fast_ica_processing(file_path, output_path, sampling_rate, num_components=10, 
-                       max_samples=None, progress_callback=None):
-    """
-    执行 LCD-FASTICA 处理的主函数（向后兼容接口）
-    
-    Args:
-        file_path: 输入信号文件路径 (.npy)
-        output_path: 输出文件路径 (.mat)
-        sampling_rate: 采样率 (Hz)
-        num_components: 分解分量数量
-        max_samples: 最大采样点数
-        progress_callback: 进度回调函数 callback(current_step, total_steps, message)
-    """
-    def report_progress(step, message):
-        if progress_callback:
-            progress_callback(step, 4, message)
-        logger.info(message)
-    
-    try:
-        report_progress(1, "读取 NPY 文件")
-        part_channel_data = np.load(file_path)
-        if max_samples is not None:
-            part_channel_data = part_channel_data[:max_samples]
-        
-        np_channel_data = part_channel_data
-        fs = sampling_rate
-        N = len(np_channel_data)
-        n = np.arange(N)
-        t = n / fs
-
-        # Design low-pass filter
-        report_progress(2, "应用低通滤波器")
-        cutoff = 5000
-        nyquist = 0.5 * fs
-        normal_cutoff = cutoff / nyquist
-        
-        # Fix: Handle scipy.signal.butter return value safely
-        butter_result = butter(5, normal_cutoff, btype='low', analog=False)
-        # Ensure we get exactly 2 values (b, a)
-        if isinstance(butter_result, tuple) and len(butter_result) == 2:
-            b, a = butter_result
-        else:
-            raise RuntimeError("butter() returned unexpected format")
-        
-        x = lfilter(b, a, np_channel_data)
-
-        report_progress(3, f"执行 LCD 分解 (分量数：{num_components})")
-        isc_components = local_characteristic_scale_decomposition(x, t, num_components=num_components)
-
-        # Fix: Replace print statements with logging
-        logger.info(f"生成的 ISC 分量数量：{len(isc_components)}")
-        logger.debug(f"原信号：Min={np.min(x)}, Max={np.max(x)}, Mean={np.mean(x)}")
-
-        # Calculate and log frequency information
-        Y = np.fft.fft(x, 2 ** int(np.ceil(np.log2(len(x))))) / len(x)
-        f = fs / 2 * np.linspace(0, 1, len(Y) // 2)
-        max_freq_x = f[np.argmax(2 * np.abs(Y[:len(Y) // 2]))]
-        logger.debug(f"原信号的最大频率：{max_freq_x} Hz")
-
-        for i, isc in enumerate(isc_components):
-            Y_isc = np.fft.fft(isc, 2 ** int(np.ceil(np.log2(len(isc))))) / len(isc)
-            max_freq_isc = f[np.argmax(2 * np.abs(Y_isc[:len(Y_isc) // 2]))]
-            logger.debug(f"ISC Component {i+1}: Min={np.min(isc)}, Max={np.max(isc)}, Mean={np.mean(isc)}")
-            logger.debug(f"ISC Component {i+1} 的最大频率：{max_freq_isc} Hz")
-
-        correlation_coefficients = [np.corrcoef(x, isc)[0, 1] for isc in isc_components]
-        for i, corr in enumerate(correlation_coefficients):
-            logger.debug(f"ISC Component {i+1} 与原信号的相关系数：{corr}")
-
-        reconstructed_signal = np.sum(isc_components, axis=0)
-        reconstruction_error = np.linalg.norm(x - reconstructed_signal, ord=2)
-        logger.info(f"重构误差：{reconstruction_error}")
-
-        # Fix: Use column_stack with proper list argument
-        isc_components_array = np.column_stack(isc_components)
-        isc_component_1 = isc_components_array[:, 0]
-        S = np.vstack((isc_component_1, x)).T
-
-        imputer = SimpleImputer(strategy='mean')
-        S_imputed = imputer.fit_transform(S)
-        
-        # Fix: Remove redundant centering and whitening - FastICA handles this internally
-        # Only keep imputation as FastICA requires clean data
-        logger.debug(f"预处理完成，形状：{S_imputed.shape}")
-
-        report_progress(4, "执行 FastICA 分离")
-        # Fix: Use the num_components parameter instead of hardcoding to 2
-        # Ensure n_components does not exceed the number of input channels
-        ica_n_components = min(num_components, S_imputed.shape[1])
-        logger.info(f"FastICA 设置分量数：{ica_n_components}")
-        ica = FastICA(n_components=ica_n_components, random_state=0, tol=1e-4, max_iter=500)
-
-        # Fix: Remove unsafe dynamic attribute access - use standard tqdm without callback
-        logger.debug("开始 FastICA 迭代...")
-        signal_ica = ica.fit_transform(S_imputed)
-        logger.info(f"FastICA 完成，输出 {signal_ica.shape[1]} 个独立成分")
-
-        ica_result_dict = {
-            'ICA_Components': signal_ica,
-            'Estimated_Mixing_Matrix': ica.mixing_
-        }
-        savemat(output_path, ica_result_dict)
-        print(f'ICA results saved successfully to {output_path}')
-        
-        report_progress(4, "处理完成")
-
-    except Exception as e:
-        logger.error(f"fast_ica_processing 失败：{str(e)}")
-        raise
-
-def plot_intermediate_results(signal, components, method_name, file_basename, save_dir=None):
-    """
-    绘制中间处理结果的图线
-    
-    Args:
-        signal: 原始信号
-        components: 分解/分离后的分量数组 (n_components, length)
-        method_name: 方法名称（如 "LCD", "VMD", "FastICA"）
-        file_basename: 文件基础名称（用于保存文件名）
-        save_dir: 保存目录（如果为 None，则不保存）
-    """
-    if save_dir is None:
-        return
-    
-    try:
-        os.makedirs(save_dir, exist_ok=True)
-        
-        n_components = components.shape[0] if components.ndim > 1 else 1
-        if components.ndim == 1:
-            components = components.reshape(1, -1)
-        
-        # 创建图形
-        fig, axes = plt.subplots(n_components + 1, 1, figsize=(12, 3 * (n_components + 1)))
-        if n_components + 1 == 1:
-            axes = [axes]
-        
-        # 绘制原始信号
-        axes[0].plot(signal, 'k-', linewidth=0.8)
-        axes[0].set_title(f'Original Signal', fontsize=10)
-        axes[0].set_ylabel('Amplitude')
-        axes[0].grid(True, alpha=0.3)
-        
-        # 绘制各个分量
-        for i in range(n_components):
-            axes[i + 1].plot(components[i], 'b-', linewidth=0.8)
-            axes[i + 1].set_title(f'{method_name} Component {i+1}', fontsize=10)
-            axes[i + 1].set_ylabel('Amplitude')
-            axes[i + 1].set_xlabel('Sample')
-            axes[i + 1].grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        
-        # 保存图形
-        save_path = os.path.join(save_dir, f"{file_basename}_{method_name}.png")
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        plt.close(fig)
-        
-        logger.info(f"中间产物图线已保存至: {save_path}")
-        
-    except Exception as e:
-        logger.warning(f"绘制中间产物图线失败: {str(e)}")
-        # 确保关闭图形以避免内存泄漏
-        try:
-            plt.close('all')
-        except:
-            pass
-
-
-def process_signal_pipeline(file_path, output_path, sampling_rate, processing_methods, 
-                           max_samples=None, num_components=10, progress_callback=None,
-                           plot_intermediate=False, plot_save_dir=None,
-                           enable_pso=False, fault_frequencies=None, pso_config=None):
-    """
-    灵活的信号处理管道，支持单一分解方法 + 可选 FastICA，支持PSO参数优化
-    
-    Args:
-        file_path: 输入信号文件路径 (.npy)
-        output_path: 输出文件路径 (.mat)
-        sampling_rate: 采样率 (Hz)
-        processing_methods: 处理方法列表，仅允许 ['分解方法'] 或 ['分解方法', 'FastICA']
-        max_samples: 最大采样点数
-        num_components: 分解/分离的分量数量
-        progress_callback: 进度回调函数 callback(current_step, total_steps, message)
-        plot_intermediate: 是否绘制中间产物图线（默认 False）
-        plot_save_dir: 图线保存目录（如果为 None 且 plot_intermediate=True，则不保存）
-        enable_pso: 是否启用PSO参数优化（默认 False）
-        fault_frequencies: 故障特征频率列表 (List[float])，用于PSO适应度计算
-        pso_config: PSO配置字典，包含以下键：
-            - n_particles: 粒子数（默认 20）
-            - max_iterations: 最大迭代次数（默认 30）
-            - c1: 学习因子c1（默认 2.0）
-            - c2: 学习因子c2（默认 2.0）
-            - w_start: 初始惯性权重（默认 0.9）
-            - w_end: 最终惯性权重（默认 0.4）
-    
-    Returns:
-        processed_signal: 处理后的信号数组
-        processing_info: 处理信息字典（新增 'pso_optimization' 字段）
-    
-    Raises:
-        ValueError: 当处理方法组合不合法时
-        ImportError: 当所需依赖未安装时
-        RuntimeError: 当处理过程失败时
-    """
-    def report_progress(step, message):
-        """Helper function to report progress"""
-        if progress_callback:
-            progress_callback(step, len(processing_methods), message)
-        logger.info(f"Step {step}/{len(processing_methods)}: {message}")
-    
-    # Validate processing methods combination
-    decomposition_methods = ['LCD', 'VMD', 'EEMD', 'LMD']
-    allowed_methods = decomposition_methods + ['FastICA']
-    
-    # Check 1: Validate all methods are allowed
-    for method in processing_methods:
-        if method not in allowed_methods:
-            raise ValueError(f"不支持的处理方法：{method}")
-    
-    # Check 2: Ensure only one decomposition method
-    decomp_count = sum(1 for method in processing_methods if method in decomposition_methods)
-    if decomp_count == 0:
-        raise ValueError("必须选择一种分解方法（LCD、VMD、EEMD 或 LMD）")
-    if decomp_count > 1:
-        raise ValueError("只允许使用一种分解方法，禁止多种分解方法串联")
-    
-    # Check 3: Ensure FastICA is only used after decomposition method
-    if 'FastICA' in processing_methods:
-        if processing_methods[0] == 'FastICA':
-            raise ValueError("FastICA 必须在分解方法之后使用")
-        if len(processing_methods) > 2:
-            raise ValueError("最多只能使用两种方法：一种分解方法 + FastICA")
-    
-    # Initialize PSO configuration
-    pso_info = {'enabled': enable_pso, 'optimized_params': None}
-    lcd_a_param = 1.0  # 默认插值参数
-    fastica_tol = 1e-4  # 默认收敛阈值
-    
-    # PSO Optimization Step (if enabled and using LCD)
-    if enable_pso and 'LCD' in processing_methods:
-        if not PSO_AVAILABLE:
-            logger.warning("PSO优化器不可用，跳过PSO优化步骤")
-        elif fault_frequencies is None or len(fault_frequencies) == 0:
-            logger.warning("未提供故障特征频率，跳过PSO优化步骤")
-        else:
-            try:
-                report_progress(0, "执行PSO参数优化")
-                
-                # Set default PSO config
-                if pso_config is None:
-                    pso_config = {}
-                
-                n_particles = pso_config.get('n_particles', 20)
-                max_iterations = pso_config.get('max_iterations', 30)
-                c1 = pso_config.get('c1', 2.0)
-                c2 = pso_config.get('c2', 2.0)
-                w_start = pso_config.get('w_start', 0.9)
-                w_end = pso_config.get('w_end', 0.4)
-                
-                logger.info(f"PSO配置: 粒子数={n_particles}, 迭代次数={max_iterations}, c1={c1}, c2={c2}")
-                
-                # Read signal for optimization
-                signal_for_pso = np.load(file_path)
-                if max_samples is not None:
-                    signal_for_pso = signal_for_pso[:max_samples]
-                
-                # Run optimization using the convenience function
-                best_a, best_tol, optimization_info = optimize_lcd_fastica_params(
-                    signal=signal_for_pso,
-                    fs=sampling_rate,
-                    fault_frequencies=fault_frequencies,
-                    pso_config=pso_config,
-                    progress_callback=lambda iter, max_iter, fitness: report_progress(
-                        0, f"PSO优化中... ({iter}/{max_iter}, F={fitness:.4f})"
-                    ) if progress_callback else None
-                )
-                
-                # Extract optimized parameters
-                lcd_a_param = best_a
-                fastica_tol = best_tol
-                
-                pso_info['optimized_params'] = {
-                    'a': best_a,
-                    'tol': best_tol,
-                    'full_info': optimization_info
-                }
-                pso_info['best_fitness'] = optimization_info['best_fitness']
-                
-                logger.info(f"PSO优化完成: a*={lcd_a_param:.4f}, tol*={fastica_tol:.2e}, F*={optimization_info['best_fitness']:.4f}")
-                report_progress(0, f"PSO优化完成 (F={optimization_info['best_fitness']:.4f})")
-                
-            except Exception as e:
-                logger.error(f"PSO优化失败：{str(e)}，使用默认参数继续")
-                pso_info['error'] = str(e)
-    
-    # Read signal
-    report_progress(0, "读取信号文件")
-    try:
-        signal = np.load(file_path)
-    except Exception as e:
-        raise RuntimeError(f"读取 NPY 文件失败：{str(e)}")
-    
-    if max_samples is not None:
-        signal = signal[:max_samples]
-    
-    fs = sampling_rate
-    N = len(signal)
-    t = np.arange(N) / fs
-    
-    current_signal = signal.copy()
-    processing_steps = []
-    
-    # Create plot save directory if needed
-    file_basename = os.path.splitext(os.path.basename(file_path))[0]
-    if plot_intermediate and plot_save_dir is None:
-        # Default to a subdirectory in the output path's parent
-        plot_save_dir = os.path.join(os.path.dirname(output_path), 'intermediate_plots')
-    
-    # Apply processing methods sequentially
-    for idx, method in enumerate(processing_methods):
-        try:
-            if method == 'LCD':
-                report_progress(idx + 1, f"执行 LCD 分解 (目标分量数：{num_components}, a={lcd_a_param:.4f})")
-                isc_components = local_characteristic_scale_decomposition(
-                    current_signal, t, num_components=num_components, 
-                    interpolation_param=lcd_a_param
-                )
-                
-                # Limit the number of components to prevent dimension explosion
-                n_components_to_use = min(len(isc_components), num_components)
-                isc_components = isc_components[:n_components_to_use]
-                
-                # Plot intermediate results if enabled
-                if plot_intermediate:
-                    components_array = np.array(isc_components)
-                    plot_intermediate_results(current_signal, components_array, 'LCD', 
-                                            file_basename, plot_save_dir)
-                
-                current_signal = np.column_stack(isc_components)
-                processing_steps.append(f"LCD({n_components_to_use},a={lcd_a_param:.2f})")
-                logger.info(f"LCD 完成，生成 {n_components_to_use} 个分量 (a={lcd_a_param:.4f})")
-                
-            elif method == 'VMD':
-                if not VMD_AVAILABLE:
-                    raise ImportError("vmdpy 库未安装，无法执行 VMD 分解。请运行：pip install vmdpy")
-                
-                report_progress(idx + 1, f"执行 VMD 分解 (模态数：{num_components})")
-                imfs = vmd_decomposition(current_signal, fs, K=num_components)
-                
-                selected_imfs = select_correlated_components(imfs, current_signal)
-                n_components_to_use = min(len(selected_imfs), num_components)
-                selected_imfs = selected_imfs[:n_components_to_use]
-                
-                # Plot intermediate results if enabled
-                if plot_intermediate:
-                    plot_intermediate_results(current_signal, selected_imfs, 'VMD', 
-                                            file_basename, plot_save_dir)
-                
-                # Fix: Ensure selected_imfs is a list of arrays before column_stack
-                current_signal = np.column_stack(list(selected_imfs))
-                processing_steps.append(f"VMD({n_components_to_use})")
-                logger.info(f"VMD 完成，选中 {n_components_to_use} 个分量")
-                
-            elif method == 'EEMD':
-                if not EEMD_AVAILABLE:
-                    raise ImportError("PyEMD 库未安装，无法执行 EEMD 分解。请运行：pip install PyEMD")
-                
-                report_progress(idx + 1, f"执行 EEMD 分解 (最大 IMF 数：{num_components})")
-                imfs = eemd_decomposition(current_signal, fs, max_imf=num_components)
-                
-                selected_imfs = select_correlated_components(imfs, current_signal)
-                n_components_to_use = min(len(selected_imfs), num_components)
-                selected_imfs = selected_imfs[:n_components_to_use]
-                
-                # Plot intermediate results if enabled
-                if plot_intermediate:
-                    plot_intermediate_results(current_signal, selected_imfs, 'EEMD', 
-                                            file_basename, plot_save_dir)
-                
-                # Fix: Ensure selected_imfs is a list of arrays before column_stack
-                current_signal = np.column_stack(list(selected_imfs))
-                processing_steps.append(f"EEMD({n_components_to_use})")
-                logger.info(f"EEMD 完成，选中 {n_components_to_use} 个分量")
-                
-            elif method == 'LMD':
-                if not LMD_AVAILABLE:
-                    raise ImportError("PyLMD 库未安装，无法执行 LMD 分解。请运行：pip install PyLMD")
-                
-                report_progress(idx + 1, "执行 LMD 分解")
-                imfs = lmd_decomposition(current_signal, fs)
-                
-                selected_imfs = select_correlated_components(imfs, current_signal)
-                n_components_to_use = min(len(selected_imfs), num_components)
-                selected_imfs = selected_imfs[:n_components_to_use]
-                
-                # Plot intermediate results if enabled
-                if plot_intermediate:
-                    plot_intermediate_results(current_signal, selected_imfs, 'LMD', 
-                                            file_basename, plot_save_dir)
-                
-                # Fix: Ensure selected_imfs is a list of arrays before column_stack
-                current_signal = np.column_stack(list(selected_imfs))
-                processing_steps.append(f"LMD({n_components_to_use})")
-                logger.info(f"LMD 完成，选中 {n_components_to_use} 个分量")
-                
-            elif method == 'FastICA':
-                # Check if signal has enough channels for FastICA
-                if current_signal.ndim == 1 or current_signal.shape[1] < 2:
-                    logger.warning("单通道信号无法执行 FastICA，跳过此步骤")
-                    processing_steps.append("FastICA_Skipped")
-                    continue
-                
-                report_progress(idx + 1, f"执行 FastICA 分离 (分量数：{min(num_components, current_signal.shape[1])}, tol={fastica_tol:.2e})")
-                
-                # Handle NaN values
-                imputer = SimpleImputer(strategy='mean')
-                signal_imputed = imputer.fit_transform(current_signal)
-                
-                # FastICA handles centering and whitening internally
-                # Only standardize if needed for numerical stability
-                ica_n_components = min(num_components, signal_imputed.shape[1])
-                ica = FastICA(n_components=ica_n_components, random_state=0, tol=fastica_tol, max_iter=500)
-                signal_ica = ica.fit_transform(signal_imputed)
-                
-                # Plot intermediate results if enabled (transpose to get shape: n_components x length)
-                if plot_intermediate:
-                    signal_ica_transposed = signal_ica.T
-                    plot_intermediate_results(current_signal[:, 0] if current_signal.ndim > 1 else current_signal, 
-                                            signal_ica_transposed, 'FastICA', 
-                                            file_basename, plot_save_dir)
-                
-                current_signal = signal_ica
-                processing_steps.append(f"FastICA({current_signal.shape[1]},tol={fastica_tol:.0e})")
-                logger.info(f"FastICA 完成，输出 {current_signal.shape[1]} 个成分 (tol={fastica_tol:.2e})")
-        
-        except Exception as e:
-            logger.error(f"处理步骤 {method} 失败：{str(e)}")
-            raise RuntimeError(f"处理方法 '{method}' 执行失败：{str(e)}") from e
-    
-    # Ensure output is 2D array
-    if current_signal.ndim == 1:
-        current_signal = current_signal.reshape(-1, 1)
-    
-    # Clean up pso_info for MATLAB serialization
-    pso_info_serializable = {
-        'enabled': bool(pso_info.get('enabled', False)),
-        'optimized_params_a': 0.0,
-        'optimized_params_tol': 0.0,
-        'best_fitness': float(pso_info.get('best_fitness', 0.0)) if pso_info.get('best_fitness') is not None else 0.0,
-        'error': str(pso_info.get('error', '')) if pso_info.get('error') else ''
-    }
-    
-    # Extract serializable optimized parameters
-    opt_params = pso_info.get('optimized_params')
-    if opt_params and isinstance(opt_params, dict):
-        pso_info_serializable['optimized_params_a'] = float(opt_params.get('a', 1.0))
-        pso_info_serializable['optimized_params_tol'] = float(opt_params.get('tol', 1e-4))
-    
-    processing_info = {
-        'input_shape': signal.shape,
-        'output_shape': current_signal.shape,
-        'processing_steps': processing_steps,
-        'sampling_rate': sampling_rate,
-        'time_vector': t,
-        'pso_optimization': pso_info_serializable
-    }
-    
-    # Save results
-    ica_result_dict = {
-        'ICA_Components': current_signal,
-        'Processing_Info': processing_info,
-        'Processing_Steps': '_'.join(processing_steps)
-    }
-    
-    try:
-        savemat(output_path, ica_result_dict)
-        logger.info(f'处理结果已保存至 {output_path}')
-    except Exception as e:
-        raise RuntimeError(f"保存 MAT 文件失败：{str(e)}") from e
-    
-    report_progress(len(processing_methods), "处理完成")
-    
-    return current_signal, processing_info
-
-
-def process_signal_pipeline_with_pso(file_path, output_path, sampling_rate, processing_methods,
-                                    fault_frequencies, max_samples=None, num_components=10,
-                                    progress_callback=None, plot_intermediate=False, 
-                                    plot_save_dir=None, pso_config=None):
-    """
-    带PSO参数优化的信号处理管道（便捷封装函数）
-    
-    Args:
-        file_path: 输入信号文件路径 (.npy)
-        output_path: 输出文件路径 (.mat)
-        sampling_rate: 采样率 (Hz)
-        processing_methods: 处理方法列表（必须包含 'LCD'）
-        fault_frequencies: 故障特征频率列表 (List[float])，用于PSO适应度计算
-        max_samples: 最大采样点数
-        num_components: 分解/分离的分量数量
-        progress_callback: 进度回调函数 callback(current_step, total_steps, message)
-        plot_intermediate: 是否绘制中间产物图线（默认 False）
-        plot_save_dir: 图线保存目录
-        pso_config: PSO配置字典
-    
-    Returns:
-        processed_signal: 处理后的信号数组
-        processing_info: 处理信息字典（包含PSO优化结果）
-    
-    Example:
-        >>> signal, info = process_signal_pipeline_with_pso(
-        ...     file_path='data/signal.npy',
-        ...     output_path='results/output.mat',
-        ...     sampling_rate=20000,
-        ...     processing_methods=['LCD', 'FastICA'],
-        ...     fault_frequencies=[50.0, 100.0, 150.0],
-        ...     num_components=10
-        ... )
-        >>> print(info['pso_optimization']['optimized_params'])
-    """
-    if not PSO_AVAILABLE:
-        raise ImportError("PSO优化器不可用。请确保 pso_optimizer.py 存在且依赖已安装")
-    
-    if fault_frequencies is None or len(fault_frequencies) == 0:
-        raise ValueError("使用PSO优化时必须提供故障特征频率列表")
-    
-    if 'LCD' not in processing_methods:
-        logger.warning("PSO优化仅支持LCD分解方法，当前方法列表不包含LCD")
-    
-    # Call the main pipeline with PSO enabled
-    return process_signal_pipeline(
-        file_path=file_path,
-        output_path=output_path,
-        sampling_rate=sampling_rate,
-        processing_methods=processing_methods,
-        max_samples=max_samples,
-        num_components=num_components,
-        progress_callback=progress_callback,
-        plot_intermediate=plot_intermediate,
-        plot_save_dir=plot_save_dir,
-        enable_pso=True,
-        fault_frequencies=fault_frequencies,
-        pso_config=pso_config
-    )
